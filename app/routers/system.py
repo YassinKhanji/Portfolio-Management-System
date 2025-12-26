@@ -16,9 +16,9 @@ from sqlalchemy.orm import Session
 import logging
 from datetime import datetime
 
-from app.models.database import SessionLocal, User, SystemStatus as SystemStatusModel
-from app.trading.regime_detection import CryptoRegimeDetector
-from app.trading.traditional_assets_regime import TraditionalAssetsRegimeDetector
+from ..models.database import SessionLocal, User, SystemStatus as SystemStatusModel
+from ..trading.regime_detection import CryptoRegimeDetector
+from ..trading.traditional_assets_regime import TraditionalAssetsRegimeDetector
 
 router = APIRouter(prefix="/api", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ async def get_system_alerts(
 
 
 @router.post("/system/emergency-stop")
-async def emergency_stop(reason: str = "Manual admin stop"):
+async def emergency_stop(reason: str = "Manual admin stop", db: Session = Depends(get_db)):
     """
     Emergency stop all trading (admin only).
     
@@ -345,25 +345,38 @@ async def emergency_stop(reason: str = "Manual admin stop"):
         reason: Reason for emergency stop
         
     Returns:
-        {"status": "stopped", "reason": "..."}
+        {"status": "stopped", "reason": "...", "timestamp": "..."}
     """
     try:
         logger.critical(f"EMERGENCY STOP triggered: {reason}")
         
-        # TODO: Set emergency stop flag in database
+        # Update system status in database
+        system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
+        if not system_status:
+            system_status = SystemStatusModel(id="system", emergency_stop=True)
+        
+        system_status.emergency_stop = True
+        system_status.updated_at = datetime.utcnow()
+        
+        db.add(system_status)
+        db.commit()
+        
+        logger.warning(f"Emergency stop activated: {reason}")
         
         return {
             "status": "stopped",
             "reason": reason,
+            "emergency_stop": True,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
     except Exception as e:
         logger.error(f"Emergency stop failed: {str(e)}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/system/emergency-stop/reset")
-async def emergency_stop_reset():
+async def emergency_stop_reset(db: Session = Depends(get_db)):
     """
     Reset emergency stop and resume trading (admin only).
     
@@ -373,12 +386,25 @@ async def emergency_stop_reset():
     try:
         logger.info("Emergency stop RESET - trading resumed")
         
-        # TODO: Clear emergency stop flag in database
+        # Clear emergency stop flag in database
+        system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
+        if not system_status:
+            system_status = SystemStatusModel(id="system", emergency_stop=False)
+        
+        system_status.emergency_stop = False
+        system_status.updated_at = datetime.utcnow()
+        
+        db.add(system_status)
+        db.commit()
+        
+        logger.warning("Emergency stop has been RESET - trading resumed")
         
         return {
             "status": "resumed",
+            "emergency_stop": False,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
     except Exception as e:
         logger.error(f"Emergency stop reset failed: {str(e)}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

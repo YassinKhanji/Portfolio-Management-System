@@ -467,26 +467,5 @@ export const AdminDashboard = () => {
 """
 
 if __name__ == "__main__":
-    import asyncio
-    
-    async def main():
-        # Example usage
-        client = TradingSystemClient(base_url="http://localhost:8000")
-        
-        try:
-            # Get system status
-            status = await client.get_system_health()
-            print(f"System Status: {status['status']}")
-            
-            # Get regime
-            regime = await client.get_regime_status()
-            print(f"Current Season: {regime['season']}")
-            
-            # Rebalance user
-            result = await client.rebalance_user("user123")
-            print(f"Rebalance Status: {result['status']}")
-        
-        finally:
-            await client.close()
-    
-    asyncio.run(main())
+    # Example usage available in tests/test_integration.py
+    pass

@@ -40,8 +40,14 @@ class User(Base):
     
     id = Column(String, primary_key=True)  # UUID or SnapTrade user ID
     email = Column(String, unique=True, nullable=False)
-    snaptrade_token = Column(String, nullable=False)  # Encrypted
-    snaptrade_user_id = Column(String, nullable=False)
+    password_hash = Column(String, nullable=False)  # Hashed password
+    full_name = Column(String, nullable=True)
+    
+    # User role and status
+    role = Column(String, default="client")  # admin or client
+    snaptrade_token = Column(String, nullable=True)  # Encrypted (optional if not linked)
+    snaptrade_user_id = Column(String, nullable=True)  # Optional if not linked
+    snaptrade_linked = Column(Boolean, default=False)  # Whether SnapTrade is connected
     
     # User preferences
     risk_profile = Column(String, default="Balanced")  # Conservative, Balanced, Aggressive

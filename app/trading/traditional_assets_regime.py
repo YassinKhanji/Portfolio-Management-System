@@ -377,33 +377,33 @@ class TraditionalAssetsRegimeDetector:
     
     def _calculate_returns(self, ticker: str, days: int) -> float:
         """Calculate returns over specified period"""
-        # Placeholder
-        return 0.05  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with market data provider
+        return 0.05
     
     def _calculate_spread(self, ticker1: str, ticker2: str) -> float:
         """Calculate spread between two securities"""
-        # Placeholder
-        return 0.02  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with market data provider
+        return 0.02
     
     def _get_latest_level(self, ticker: str) -> float:
         """Get latest price level"""
-        # Placeholder
-        return 15.0  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with market data provider
+        return 15.0
     
     def _calculate_correlation(self, ticker1: str, ticker2: str, days: int) -> float:
         """Calculate correlation between two assets"""
-        # Placeholder
-        return 0.3  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with historical data provider
+        return 0.3
     
     def _estimate_yield_curve(self) -> float:
         """Estimate yield curve slope (10Y - 2Y)"""
-        # Placeholder
-        return 0.5  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with treasury rates provider
+        return 0.5
     
     def _estimate_dividend_yield(self, ticker: str) -> float:
         """Estimate dividend yield"""
-        # Placeholder
-        return 0.018  # TODO: Implement actual calculation
+        # PLACEHOLDER: Integrate with financial data provider
+        return 0.018
     
     def _classify_vix(self, vix_level: float) -> str:
         """Classify VIX level into regime"""

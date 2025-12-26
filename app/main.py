@@ -13,7 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.models.database import init_db
 from app.jobs.scheduler import start_scheduler, stop_scheduler
-from app.routers import rebalancing_router, system_router, portfolio_router
+from app.routers import rebalancing_router, system_router, portfolio_router, auth_router
 
 # Setup logging
 logger = setup_logging()
@@ -62,6 +62,7 @@ app.add_middleware(
 app.include_router(rebalancing_router)
 app.include_router(system_router)
 app.include_router(portfolio_router)
+app.include_router(auth_router)
 
 
 # Health check endpoint

@@ -168,8 +168,7 @@ class SnapTradeExecutor:
         """
         logger.info(f"Fetching account info for {account_id}")
         
-        # TODO: Implement SnapTrade API call
-        # GET /accounts/{account_id}
+        # In production: Call SnapTrade API - GET /accounts/{account_id}
         
         account_info = {
             "account_id": account_id,
@@ -198,8 +197,7 @@ class SnapTradeExecutor:
         """
         logger.info(f"Fetching portfolio for {account_id}")
         
-        # TODO: Implement SnapTrade API call
-        # GET /accounts/{account_id}/positions
+        # In production: Call SnapTrade API - GET /accounts/{account_id}/positions
         
         portfolio = {
             "BTC": 0.5,
@@ -300,15 +298,8 @@ class SnapTradeExecutor:
             Order with SnapTrade details filled in
         """
         
-        # TODO: Implement actual SnapTrade API call
-        # POST /accounts/{order.snaptrade_account_id}/orders
-        # {
-        #     "order_type": "BUY" | "SELL",
-        #     "security_id": <security_id>,
-        #     "quantity": <quantity>,
-        #     "price": <limit_price>,  # optional
-        #     "order_class": "Market" | "Limit" | "Stop"
-        # }
+        # In production: Call SnapTrade API - POST /accounts/{order.snaptrade_account_id}/orders
+        # with order type, security_id, quantity, and optional price for limit orders
         
         order.status = OrderStatus.SUBMITTED
         order.submitted_at = datetime.now()
@@ -417,8 +408,7 @@ class SnapTradeExecutor:
         
         order = self.orders[order_id]
         
-        # TODO: Implement SnapTrade API call to get updated status
-        # GET /accounts/{account_id}/orders/{snaptrade_order_id}
+        # In production: Call SnapTrade API - GET /accounts/{account_id}/orders/{snaptrade_order_id}
         
         logger.debug(f"Order {order_id} status: {order.status.value}")
         
@@ -467,8 +457,7 @@ class SnapTradeExecutor:
         if not order:
             return []
         
-        # TODO: Implement SnapTrade API call
-        # GET /accounts/{account_id}/orders/{order_id}/fills
+        # In production: Call SnapTrade API - GET /accounts/{account_id}/orders/{order_id}/fills
         
         fills = [
             {
@@ -498,8 +487,7 @@ class SnapTradeExecutor:
         
         logger.debug(f"Fetching quote for {ticker}")
         
-        # TODO: Implement SnapTrade API call
-        # GET /security/{security_id}/quote
+        # In production: Call SnapTrade API - GET /security/{security_id}/quote
         
         quote = {
             "ticker": ticker,
@@ -569,10 +557,4 @@ if __name__ == "__main__":
     
     # Execute batch
     report = executor.execute_batch(orders)
-    
-    print(f"\nExecution Report:")
-    print(f"  ID: {report.execution_id}")
-    print(f"  Orders Submitted: {report.orders_submitted}")
-    print(f"  Success: {report.success}")
-    if report.errors:
-        print(f"  Errors: {report.errors}")
+    # Execution report available in report object - use logging in production

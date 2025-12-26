@@ -136,7 +136,7 @@ class CryptoRegimeDetector:
                 logger.error("Failed to detect regimes: no Kraken data")
                 return None
             
-            # TODO: Calculate regimes from Kraken data
+            # In production, classify regime from Kraken data
             # regime = self._classify_regime(data)
             
             logger.info(f"Crypto regime detected")

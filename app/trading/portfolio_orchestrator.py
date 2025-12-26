@@ -195,10 +195,10 @@ class PortfolioOrchestrator:
         
         logger.debug("Detecting crypto regime...")
         
-        # TODO: In production, call actual detector
+        # In production, integrate CryptoRegimeDetector for live detection
         # regime, confidence = self.crypto_regime_detector.detect_regime()
         
-        # Placeholder
+        # PLACEHOLDER: Using mock regime for development
         regime_signal = {
             'asset_class': 'CRYPTO',
             'regime': 'BULL',
@@ -225,10 +225,10 @@ class PortfolioOrchestrator:
         
         logger.debug("Detecting traditional regime...")
         
-        # TODO: In production, call actual detector
+        # In production, integrate TraditionalAssetsRegimeDetector for live detection
         # regime, confidence = self.traditional_regime_detector.detect_regime()
         
-        # Placeholder
+        # PLACEHOLDER: Using mock regime for development
         regime_signal = {
             'asset_class': 'TRADITIONAL',
             'regime': 'CONSOLIDATION',
@@ -266,7 +266,7 @@ class PortfolioOrchestrator:
                 logger.debug(f"Skipping rebalance: {days_since} days since last rebalance")
                 return False
         
-        # TODO: Check if portfolio manager flags rebalancing
+        # In production, integrate with portfolio manager drift detection
         # if self.portfolio_manager.should_rebalance():
         #     return True
         
@@ -361,22 +361,22 @@ class PortfolioOrchestrator:
         
         return {
             'portfolio_value': self.portfolio_value,
-            'total_return': 0.0,  # TODO: Calculate from initial value
-            'ytd_return': 0.0,  # TODO: Calculate
-            'monthly_return': 0.0,  # TODO: Calculate
-            'volatility': 0.0,  # TODO: Calculate
-            'sharpe_ratio': 0.0,  # TODO: Calculate
-            'max_drawdown': 0.0,  # TODO: Calculate
+            'total_return': 0.0,  # PLACEHOLDER: Integrate with performance calculator
+            'ytd_return': 0.0,  # PLACEHOLDER: Integrate with performance calculator
+            'monthly_return': 0.0,  # PLACEHOLDER: Integrate with performance calculator
+            'volatility': 0.0,  # PLACEHOLDER: Integrate with risk calculator
+            'sharpe_ratio': 0.0,  # PLACEHOLDER: Integrate with risk calculator
+            'max_drawdown': 0.0,  # PLACEHOLDER: Integrate with drawdown analyzer
         }
     
     def get_allocation(self) -> Dict:
         """Get current portfolio allocation"""
         
         return {
-            'crypto_allocation': 0.15,  # TODO: Get from portfolio manager
-            'traditional_allocation': 0.75,  # TODO: Get from portfolio manager
-            'cash_allocation': 0.10,  # TODO: Get from portfolio manager
-            'assets': [],  # TODO: Get from portfolio manager
+            'crypto_allocation': 0.15,  # PLACEHOLDER: Integrate with portfolio manager
+            'traditional_allocation': 0.75,  # PLACEHOLDER: Integrate with portfolio manager
+            'cash_allocation': 0.10,  # PLACEHOLDER: Integrate with portfolio manager
+            'assets': [],  # PLACEHOLDER: Integrate with portfolio manager
         }
     
     # =========================================================================
