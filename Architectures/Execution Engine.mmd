@@ -1,0 +1,246 @@
+graph TB
+    Start([FROM: Trading System Engine]) --> OrderBatches[Order Batches]
+    
+    OrderBatches --> Router[STAGE 1: Smart Order Router]
+    
+    subgraph Router[Intelligent Routing Logic]
+        AssetType[Asset Type Classification]
+        LiqAnalysis[Liquidity Analysis]
+        VenueSelection[Venue Selection]
+        
+        AssetType --> EquityRoute[Equity: Primary Exchange + Dark Pools]
+        AssetType --> FXRoute[FX: Multi-Bank Aggregator]
+        AssetType --> FuturesRoute[Futures: CME/ICE/Eurex]
+        AssetType --> CryptoRoute[Crypto: Multiple Exchanges]
+        
+        LiqAnalysis --> VenueRank[Venue Ranking by Liquidity]
+        VenueSelection --> VenueRank
+    end
+    
+    VenueRank --> BrokerLayer[STAGE 2: Multi-Broker Layer]
+    
+    subgraph BrokerLayer[Broker Management]
+        Broker1[Broker 1: Primary]
+        Broker2[Broker 2: Backup]
+        Broker3[Broker 3: Specialty]
+        BrokerN[Broker N: Regional]
+        
+        Broker1 --> BrokerPool[Active Broker Pool]
+        Broker2 --> BrokerPool
+        Broker3 --> BrokerPool
+        BrokerN --> BrokerPool
+    end
+    
+    BrokerPool --> ConnectionMgmt[STAGE 3: Connection Management]
+    
+    subgraph ConnectionMgmt[API Management]
+        RESTAPIs[REST APIs]
+        WebSocket[WebSocket Streams]
+        FIXProtocol[FIX Protocol]
+        HealthCheck[Connection Health Check]
+        
+        RESTAPIs --> ConnPool[Connection Pool]
+        WebSocket --> ConnPool
+        FIXProtocol --> ConnPool
+        HealthCheck --> ConnPool
+    end
+    
+    ConnPool --> AlgoEngine[STAGE 4: Execution Algorithm Engine]
+    
+    subgraph AlgoEngine[Execution Strategies]
+        TWAP[TWAP: Time-Weighted Avg Price]
+        VWAP[VWAP: Volume-Weighted Avg Price]
+        POV[POV: Participation Rate]
+        IS[Implementation Shortfall]
+        Sniper[Sniper: Aggressive Fill]
+        Peg[Peg Orders: Follow Spread]
+        Iceberg[Iceberg: Hidden Liquidity]
+        
+        TWAP --> AlgoSelect{Select<br/>Algorithm}
+        VWAP --> AlgoSelect
+        POV --> AlgoSelect
+        IS --> AlgoSelect
+        Sniper --> AlgoSelect
+        Peg --> AlgoSelect
+        Iceberg --> AlgoSelect
+    end
+    
+    AlgoSelect --> |Based on Order Characteristics| AlgoExec[Algorithm Execution]
+    
+    subgraph AlgoExec[Execution Logic]
+        SliceOrders[Slice Large Orders]
+        TimingLogic[Timing Logic: Spread Schedule]
+        PriceImprove[Price Improvement Logic]
+        AdaptiveLogic[Adaptive Speed Based on Market]
+        
+        SliceOrders --> ChildOrders[Child Order Generation]
+        TimingLogic --> ChildOrders
+        PriceImprove --> ChildOrders
+        AdaptiveLogic --> ChildOrders
+    end
+    
+    ChildOrders --> OrderMgmt[STAGE 5: Order Management System]
+    
+    subgraph OrderMgmt[OMS Core]
+        OrderTracking[Order State Tracking]
+        FillProcessing[Fill Processing]
+        CancelReplace[Cancel/Replace Logic]
+        ErrorHandling[Error Handling]
+        
+        OrderTracking --> OMSState[OMS State Machine]
+        FillProcessing --> OMSState
+        CancelReplace --> OMSState
+        ErrorHandling --> OMSState
+    end
+    
+    subgraph OrderStates[Order Lifecycle]
+        New[New]
+        Pending[Pending]
+        PartialFill[Partially Filled]
+        Filled[Filled]
+        Cancelled[Cancelled]
+        Rejected[Rejected]
+        
+        New --> Pending
+        Pending --> PartialFill
+        PartialFill --> Filled
+        Pending --> Cancelled
+        Pending --> Rejected
+    end
+    
+    OMSState --> OrderStates
+    
+    OrderStates --> LiveExecution[STAGE 6: Live Execution]
+    
+    subgraph LiveExecution[Real-Time Execution]
+        SendOrder[Send Orders to Market]
+        ReceiveAck[Receive Acknowledgments]
+        MonitorFills[Monitor Fills]
+        ProcessRejects[Process Rejections]
+        
+        SendOrder --> Market[Live Market]
+        ReceiveAck --> Market
+        MonitorFills --> Market
+        ProcessRejects --> RetryLogic[Retry Logic]
+    end
+    
+    Market --> FillData[Fill Data Stream]
+    
+    FillData --> PostTrade[STAGE 7: Post-Trade Processing]
+    
+    subgraph PostTrade[Fill Processing & Reconciliation]
+        FillValidation[Validate Fills]
+        PriceCheck[Price Reasonableness Check]
+        CommissionCalc[Commission Calculation]
+        SlippageCalc[Slippage Calculation]
+        
+        FillValidation --> ProcessedFills[Processed Fills]
+        PriceCheck --> ProcessedFills
+        CommissionCalc --> ProcessedFills
+        SlippageCalc --> ProcessedFills
+    end
+    
+    ProcessedFills --> Reconciliation[STAGE 8: Reconciliation]
+    
+    subgraph Reconciliation[Position Reconciliation]
+        BrokerRecon[Broker Position Reconciliation]
+        InternalRecon[Internal Position Check]
+        DiscrepancyCheck[Discrepancy Detection]
+        
+        BrokerRecon --> ReconStatus{Reconciled?}
+        InternalRecon --> ReconStatus
+        DiscrepancyCheck --> ReconStatus
+    end
+    
+    ReconStatus --> |Mismatch| AlertRecon[Alert: Reconciliation Failure]
+    ReconStatus --> |Match| UpdatePositions[Update Position Database]
+    
+    AlertRecon --> ManualRecon[Manual Reconciliation]
+    ManualRecon --> UpdatePositions
+    
+    UpdatePositions --> Output[Output Package]
+    
+    subgraph Output[Execution Results]
+        FillReport[Fill Reports]
+        PnLImpact[P&L Impact]
+        ExecutionMetrics[Execution Quality Metrics]
+        PositionUpdates[Updated Positions]
+    end
+    
+    Output --> Downstream[TO: Performance Monitoring]
+    
+    subgraph Monitoring[Real-Time Execution Monitoring]
+        FillRate[Fill Rate Monitoring]
+        SlippageMonitor[Slippage vs Expected]
+        RejectRate[Rejection Rate]
+        LatencyMonitor[Latency Monitoring]
+        
+        FillRate --> ExecDash[Execution Dashboard]
+        SlippageMonitor --> ExecDash
+        RejectRate --> ExecDash
+        LatencyMonitor --> ExecDash
+    end
+    
+    FillData -.-> Monitoring
+    ProcessedFills -.-> Monitoring
+    
+    ExecDash --> QualityCheck{Quality<br/>Issues?}
+    
+    QualityCheck --> |High Slippage| AlertSlip[Alert: High Slippage]
+    QualityCheck --> |High Rejects| AlertReject[Alert: High Rejection Rate]
+    QualityCheck --> |High Latency| AlertLatency[Alert: Latency Issues]
+    QualityCheck --> |OK| Continue[Continue Normal Operation]
+    
+    AlertSlip -.-> |Adjust| AlgoEngine
+    AlertReject -.-> |Switch| BrokerLayer
+    AlertLatency -.-> |Escalate| ConnectionMgmt
+    
+    subgraph EmergencyProcedures[Emergency Controls]
+        KillSwitch[Kill Switch: Stop All Orders]
+        MarketHalt[Market Halt Detection]
+        CircuitBreaker[Circuit Breaker Triggered]
+        
+        KillSwitch --> EmergencyStop[EMERGENCY STOP]
+        MarketHalt --> EmergencyStop
+        CircuitBreaker --> EmergencyStop
+    end
+    
+    Market -.-> |Emergency| EmergencyProcedures
+    
+    subgraph Analytics[Execution Analytics]
+        CostAnalysis[Transaction Cost Analysis]
+        BenchmarkComp[Benchmark Comparison: Arrival/Close/VWAP]
+        VenueAnalysis[Venue Analysis]
+        BrokerAnalysis[Broker Performance]
+        
+        CostAnalysis --> ExecReport[Execution Report]
+        BenchmarkComp --> ExecReport
+        VenueAnalysis --> ExecReport
+        BrokerAnalysis --> ExecReport
+    end
+    
+    ProcessedFills -.-> Analytics
+    ExecReport --> |Daily| Downstream
+    
+    subgraph Optimization[Continuous Optimization]
+        AlgoTuning[Algorithm Parameter Tuning]
+        RoutingOpt[Routing Optimization]
+        VenueOpt[Venue Selection Optimization]
+        
+        AlgoTuning --> Improvements[System Improvements]
+        RoutingOpt --> Improvements
+        VenueOpt --> Improvements
+    end
+    
+    ExecReport -.-> |Weekly| Optimization
+    Improvements -.-> |Update| AlgoEngine
+    Improvements -.-> |Update| Router
+    
+    style Start fill:#0066cc,color:#fff
+    style Market fill:#28a745,color:#fff
+    style Downstream fill:#6f42c1,color:#fff
+    style EmergencyStop fill:#000,color:#fff
+    style AlertSlip fill:#fd7e14,color:#fff
+    style AlertReject fill:#fd7e14,color:#fff
+    style AlertLatency fill:#fd7e14,color:#fff
+    style EmergencyProcedures fill:#dc3545,color:#fff

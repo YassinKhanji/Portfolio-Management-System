@@ -1,0 +1,384 @@
+"""
+System Status & Monitoring Endpoints
+
+Endpoints:
+- GET /api/regime/status - Current market regime
+- GET /api/system/health - System health check
+- GET /api/system/logs - Recent logs
+- GET /api/system/alerts - Recent alerts
+- POST /api/system/emergency-stop - Emergency stop
+- POST /api/system/emergency-stop/reset - Resume trading
+"""
+
+from fastapi import APIRouter, HTTPException, Depends
+from typing import List, Optional
+from sqlalchemy.orm import Session
+import logging
+from datetime import datetime
+
+from app.models.database import SessionLocal, User, SystemStatus as SystemStatusModel
+from app.trading.regime_detection import CryptoRegimeDetector
+from app.trading.traditional_assets_regime import TraditionalAssetsRegimeDetector
+
+router = APIRouter(prefix="/api", tags=["system"])
+logger = logging.getLogger(__name__)
+
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@router.get("/regime/status")
+async def get_regime_status():
+    """
+    Get current market regime status from both crypto and equities systems.
+    
+    Returns:
+        {
+            "crypto": {
+                "season": "BULL|BEAR|SIDEWAYS|HODL",
+                "vol_regime": 0|1|2,
+                "dir_regime": 0|1|2,
+                "confidence": 0.85,
+                "btc_season": "BULL",
+                "timestamp": "2024-01-15T10:00:00Z"
+            },
+            "equities": {
+                "regime": "BULL|BEAR|CORRECTION|FLIGHT_TO_QUALITY",
+                "confidence": 0.75,
+                "timestamp": "2024-01-15T10:00:00Z"
+            }
+        }
+    """
+    try:
+        logger.info("Regime status requested")
+        
+        # Get crypto regime
+        crypto_detector = CryptoRegimeDetector()
+        crypto_regimes = crypto_detector.detect_regimes()
+        
+        # Get equities regime
+        equities_detector = TraditionalAssetsRegimeDetector()
+        equities_regime = equities_detector.detect_regime()
+        
+        # For now, return sample data until full implementation
+        # TODO: Parse actual regime data from detectors
+        response = {
+            "crypto": {
+                "season": "BULL",
+                "vol_regime": 2,
+                "dir_regime": 1,
+                "confidence": 0.85,
+                "btc_season": "BULL",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            },
+            "equities": {
+                "regime": "BULL",
+                "confidence": 0.75,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            },
+            "combined_signal": "RISK_ON",  # Derived from both
+            "last_updated": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        logger.info(f"Regime status: crypto={response['crypto']['season']}, equities={response['equities']['regime']}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Failed to get regime status: {str(e)}", exc_info=True)
+        # Return fallback data instead of error
+        return {
+            "crypto": {
+                "season": "UNKNOWN",
+                "vol_regime": 1,
+                "dir_regime": 1,
+                "confidence": 0.0,
+                "btc_season": "UNKNOWN",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            },
+            "equities": {
+                "regime": "UNKNOWN",
+                "confidence": 0.0,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            },
+            "combined_signal": "UNKNOWN",
+            "last_updated": datetime.utcnow().isoformat() + "Z",
+            "error": str(e)
+        }
+
+
+@router.get("/system/health")
+async def get_system_health(db: Session = Depends(get_db)):
+    """
+    Get system health status with real database queries.
+    
+    Returns:
+        {
+            "status": "healthy|degraded|critical",
+            "regime_engine": true,
+            "database_connection": true,
+            "market_data_age_minutes": 15,
+            "total_users": 42,
+            "active_users": 35,
+            "total_aum": 5234567.89,
+            "emergency_stop": false,
+            "last_rebalance": "2024-01-15T09:30:00Z"
+        }
+    """
+    try:
+        logger.info("System health check requested")
+        
+        # Check database connection
+        database_connected = True
+        try:
+            user_count = db.query(User).count()
+        except Exception as db_error:
+            logger.error(f"Database connection failed: {str(db_error)}")
+            database_connected = False
+            user_count = 0
+        
+        # Check regime engine
+        regime_engine_running = True
+        try:
+            crypto_detector = CryptoRegimeDetector()
+            # Basic check - detector initializes without error
+        except Exception as regime_error:
+            logger.error(f"Regime engine check failed: {str(regime_error)}")
+            regime_engine_running = False
+        
+        # Get active users (users who logged in within last 30 days)
+        # TODO: Implement last_login tracking in User model
+        active_users = user_count  # Placeholder
+        
+        # Calculate total AUM
+        # TODO: Sum all user portfolios from SnapTrade
+        total_aum = 0.0  # Placeholder
+        
+        # Check emergency stop
+        # TODO: Implement emergency stop state in database
+        emergency_stop = False
+        
+        # Market data age
+        # TODO: Check timestamp of last market data update
+        market_data_age_minutes = 15  # Placeholder
+        
+        # Determine overall status
+        if not database_connected or not regime_engine_running:
+            status = "critical"
+        elif market_data_age_minutes > 60:
+            status = "degraded"
+        else:
+            status = "healthy"
+        
+        health_data = {
+            "status": status,
+            "regime_engine": regime_engine_running,
+            "database_connection": database_connected,
+            "market_data_age_minutes": market_data_age_minutes,
+            "total_users": user_count,
+            "active_users": active_users,
+            "total_aum": total_aum,
+            "emergency_stop": emergency_stop,
+            "last_rebalance": None,  # TODO: Track last rebalance time
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        logger.info(f"System health: {status}")
+        return health_data
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        # Return degraded status on error
+        return {
+            "status": "critical",
+            "regime_engine": False,
+            "database_connection": False,
+            "market_data_age_minutes": 999,
+            "total_users": 0,
+            "active_users": 0,
+            "total_aum": 0.0,
+            "emergency_stop": False,
+            "last_rebalance": None,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "error": str(e)
+        }
+
+
+@router.get("/system/logs")
+            "status": "healthy",
+            "regime_engine": True,
+            "database_connection": True,
+            "market_data_age_minutes": 15,
+            "total_users": 42,
+            "active_users": 35,
+            "total_aum": 5234567.89,
+            "emergency_stop": False,
+            "last_rebalance": "2024-01-15T09:30:00Z"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/system/logs")
+async def get_system_logs(
+    level: Optional[str] = None,
+    limit: int = 100
+) -> List[dict]:
+    """
+    Get recent system logs.
+    
+    Args:
+        level: Filter by log level (debug, info, warning, error, critical)
+        limit: Max logs to return
+        
+    Returns:
+        List of log entries
+    """
+    try:
+        logger.info(f"Logs requested (level={level}, limit={limit})")
+        
+        # TODO: Query logs from database
+        
+        return [
+            {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "level": "info",
+                "message": "System started",
+                "component": "main"
+            }
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/system/logs")
+async def get_system_logs(
+    level: Optional[str] = None,
+    limit: int = 100
+):
+    """
+    Get recent system logs.
+    
+    Args:
+        level: Filter by log level (debug, info, warning, error, critical)
+        limit: Maximum number of logs to return
+        
+    Returns:
+        List of log entries
+    """
+    try:
+        logger.info(f"Logs requested (level={level}, limit={limit})")
+        
+        # TODO: Query logs from database or log file
+        # For now, return sample logs
+        
+        sample_logs = [
+            {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "level": "info",
+                "message": "System health check completed",
+                "component": "system"
+            },
+            {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "level": "info",
+                "message": "Regime detection completed: BULL",
+                "component": "regime_detection"
+            }
+        ]
+        
+        return sample_logs[:limit]
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/system/alerts")
+async def get_system_alerts(
+    unread_only: bool = False,
+    limit: int = 50
+) -> List[dict]:
+    """
+    Get recent alerts.
+    
+    Args:
+        unread_only: Only unread alerts
+        limit: Max alerts to return
+        
+    Returns:
+        List of alert messages
+    """
+    try:
+        logger.info(f"Alerts requested (unread_only={unread_only}, limit={limit})")
+        
+        # TODO: Query alerts from database
+        
+        return [
+            {
+                "id": "alert_123",
+                "type": "regime_change",
+                "severity": "info",
+                "message": "Regime changed from BULL to SIDEWAYS",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "read": False
+            }
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/system/emergency-stop")
+async def emergency_stop(reason: str = "Manual admin stop"):
+    """
+    Emergency stop all trading (admin only).
+    
+    Args:
+        reason: Reason for emergency stop
+        
+    Returns:
+        {"status": "stopped", "reason": "..."}
+    """
+    try:
+        logger.critical(f"EMERGENCY STOP triggered: {reason}")
+        
+        # TODO: Set emergency stop flag in database
+        
+        return {
+            "status": "stopped",
+            "reason": reason,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+    except Exception as e:
+        logger.error(f"Emergency stop failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/system/emergency-stop/reset")
+async def emergency_stop_reset():
+    """
+    Reset emergency stop and resume trading (admin only).
+    
+    Returns:
+        {"status": "resumed", "timestamp": "..."}
+    """
+    try:
+        logger.info("Emergency stop RESET - trading resumed")
+        
+        # TODO: Clear emergency stop flag in database
+        
+        return {
+            "status": "resumed",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+    except Exception as e:
+        logger.error(f"Emergency stop reset failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

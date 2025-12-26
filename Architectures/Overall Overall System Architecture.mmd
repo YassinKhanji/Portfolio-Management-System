@@ -1,0 +1,52 @@
+graph TB
+    Start([Market Data]) --> Intelligence[INTELLIGENCE LAYER<br/>Data + Regime Detection]
+    
+    Intelligence --> Research[RESEARCH LAYER<br/>Strategy Development]
+    
+    Research --> Validation{Rigorous<br/>Validation}
+    
+    Validation -->|90% Reject| Discard[Discard]
+    Validation -->|10% Pass| Pool[STRATEGY POOL<br/>30-50 Active Strategies]
+    
+    Pool --> Allocation[ALLOCATION LAYER<br/>Dynamic Portfolio Weights]
+    
+    Allocation --> Construction[PORTFOLIO CONSTRUCTION<br/>Aggregate Positions]
+    
+    Construction --> Risk[RISK MANAGEMENT<br/>Pre-Trade Gates]
+    
+    Risk -->|Pass| Execution[EXECUTION LAYER<br/>Smart Order Routing]
+    Risk -->|Fail| Reduce[Reduce Risk]
+    
+    Reduce --> Construction
+    
+    Execution --> Live[LIVE PORTFOLIO]
+    
+    Live --> Monitor[MONITORING LAYER<br/>Continuous Tracking]
+    
+    Monitor --> Performance[PERFORMANCE ANALYSIS<br/>Attribution & Health Scores]
+    
+    Performance --> Decisions{Strategic<br/>Decisions}
+    
+    Decisions -->|Scale Up| Pool
+    Decisions -->|Scale Down| Pool
+    Decisions -->|Remove| Discard
+    Decisions -->|Optimize| Quarterly[QUARTERLY REVIEW<br/>System Enhancement]
+    
+    Quarterly -.->|Improve Models| Intelligence
+    Quarterly -.->|Refine Process| Research
+    Quarterly -.->|Update Logic| Allocation
+    
+    Monitor -.->|Regime Shifts| Allocation
+    Monitor -.->|Alpha Decay| Pool
+    
+    style Start fill:#0066cc,color:#fff
+    style Intelligence fill:#17a2b8,color:#fff
+    style Research fill:#6f42c1,color:#fff
+    style Pool fill:#28a745,color:#fff
+    style Allocation fill:#fd7e14,color:#fff
+    style Risk fill:#dc3545,color:#fff
+    style Execution fill:#20c997,color:#fff
+    style Live fill:#ffc107,color:#000
+    style Monitor fill:#28a745,color:#fff
+    style Discard fill:#6c757d,color:#fff
+    style Quarterly fill:#007bff,color:#fff

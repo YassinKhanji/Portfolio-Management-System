@@ -1,0 +1,155 @@
+graph TB
+    Start([Market Data Feeds<br/>Real-Time + Historical]) --> DataIngest[Data Ingestion Layer]
+    
+    subgraph DataIngest[Data Processing]
+        Price[Price Data: OHLCV Multi-Asset]
+        Vol[Volatility: Realized + Implied]
+        Corr[Correlation Matrices]
+        Breadth[Market Breadth Indicators]
+        Macro[Macro Indicators: Rates, Credit, VIX]
+        Sentiment[Sentiment: Put/Call, Positioning]
+        
+        Price --> FeatureCalc[Feature Calculator]
+        Vol --> FeatureCalc
+        Corr --> FeatureCalc
+        Breadth --> FeatureCalc
+        Macro --> FeatureCalc
+        Sentiment --> FeatureCalc
+    end
+    
+    FeatureCalc --> FeatureSet[Feature Set: 100+ Regime Indicators]
+    
+    FeatureSet --> Tier1[TIER 1: Global Macro Regime]
+    
+    subgraph Tier1[Global Macro Classification]
+        VolCluster[Volatility Clustering]
+        TrendStrength[Trend Strength Analysis]
+        CreditSpread[Credit Spread Analysis]
+        FlightQuality[Flight-to-Quality Signals]
+        
+        VolCluster --> HMM1[Hidden Markov Model]
+        TrendStrength --> HMM1
+        CreditSpread --> HMM1
+        FlightQuality --> HMM1
+        
+        HMM1 --> GlobalState{Global State}
+    end
+    
+    GlobalState --> RiskOn[Risk-On:<br/>Low Vol, Tight Credit, Risk Assets Up]
+    GlobalState --> RiskOff[Risk-Off:<br/>Rising Vol, Widening Credit, Safe Haven Bid]
+    GlobalState --> Crisis[Crisis:<br/>Vol Spike, Credit Stress, Panic Selling]
+    GlobalState --> Neutral[Neutral:<br/>Mixed Signals, Choppy, Range-Bound]
+    
+    RiskOn --> RiskDial[Risk Dial Calculator]
+    RiskOff --> RiskDial
+    Crisis --> RiskDial
+    Neutral --> RiskDial
+    
+    RiskDial --> LeverageOutput[Leverage Target: 0.3x - 2.0x]
+    
+    FeatureSet --> Tier2[TIER 2: Asset Class Regimes]
+    
+    subgraph Tier2[Asset-Specific Classification]
+        EquityReg[Equity Regime Detection]
+        BondReg[Bond Regime Detection]
+        FXReg[FX Regime Detection]
+        CommodReg[Commodity Regime Detection]
+        
+        EquityReg --> EquityState[Equity: Bull/Bear/Sideways]
+        BondReg --> BondState[Bonds: Rally/Sell-off/Range]
+        FXReg --> FXState[FX: Trending/Ranging]
+        CommodReg --> CommodState[Commodity: Contango/Backwardation]
+    end
+    
+    EquityState --> AssetSignals[Asset Class Signals]
+    BondState --> AssetSignals
+    FXState --> AssetSignals
+    CommodState --> AssetSignals
+    
+    FeatureSet --> Tier3[TIER 3: Strategy Family Regimes]
+    
+    subgraph Tier3[Strategy-Level Classification]
+        MomDetect[Momentum Environment Detection]
+        MRDetect[Mean-Reversion Environment]
+        CarryDetect[Carry Environment Detection]
+        VolDetect[Volatility Environment]
+        
+        MomDetect --> TrendScore[Trend Score: 0-100]
+        MRDetect --> MRScore[Mean-Reversion Score: 0-100]
+        CarryDetect --> CarryScore[Carry Score: 0-100]
+        VolDetect --> VolScore[Volatility Score: 0-100]
+    end
+    
+    TrendScore --> StratSignals[Strategy Family Signals]
+    MRScore --> StratSignals
+    CarryScore --> StratSignals
+    VolScore --> StratSignals
+    
+    subgraph Validation[Regime Validation & Confidence]
+        ConsistCheck[Consistency Check across Tiers]
+        ConfidenceCalc[Confidence Score Calculation]
+        TransitionDetect[Transition Detection]
+        
+        ConsistCheck --> QualityGate{High<br/>Confidence?}
+        ConfidenceCalc --> QualityGate
+        TransitionDetect --> QualityGate
+    end
+    
+    LeverageOutput --> Validation
+    AssetSignals --> Validation
+    StratSignals --> Validation
+    
+    QualityGate --> |Low Confidence| Conservative[Use Conservative Defaults]
+    QualityGate --> |High Confidence| FinalOutput[Final Regime Package]
+    
+    Conservative --> FinalOutput
+    
+    subgraph FinalOutput[Output Package]
+        Tier1Out[Tier 1: Global State + Risk Dial]
+        Tier2Out[Tier 2: Asset Class States]
+        Tier3Out[Tier 3: Strategy Scores]
+        ConfOut[Confidence Levels]
+        
+        Tier1Out --> Package[Complete Regime Package]
+        Tier2Out --> Package
+        Tier3Out --> Package
+        ConfOut --> Package
+    end
+    
+    Package --> Downstream[TO: Dynamic Allocation Engine]
+    
+    subgraph Monitoring[Self-Monitoring & Adaptation]
+        RegimePerf[Track Regime Classification Accuracy]
+        TransitionPerf[Track Transition Timing]
+        FalseSignals[Track False Signals]
+        
+        RegimePerf --> Learning[Machine Learning Update]
+        TransitionPerf --> Learning
+        FalseSignals --> Learning
+    end
+    
+    Package -.-> Monitoring
+    Learning -.-> |Update Models Monthly| HMM1
+    
+    subgraph Alerts[Regime Alert System]
+        ShiftDetect[Regime Shift Detection]
+        ShiftDetect --> AlertType{Alert Type}
+        
+        AlertType --> Minor[Minor Shift: Log Only]
+        AlertType --> Major[Major Shift: Alert Allocation]
+        AlertType --> Critical[Critical: Emergency Alert]
+    end
+    
+    Package --> Alerts
+    Major -.-> |Alert| Downstream
+    Critical -.-> |Emergency Alert| Downstream
+    
+    style Start fill:#0066cc,color:#fff
+    style RiskOn fill:#28a745,color:#fff
+    style RiskOff fill:#ffc107,color:#000
+    style Crisis fill:#dc3545,color:#fff
+    style Neutral fill:#6c757d,color:#fff
+    style LeverageOutput fill:#17a2b8,color:#fff
+    style Downstream fill:#6f42c1,color:#fff
+    style Critical fill:#dc3545,color:#fff
+    style Major fill:#fd7e14,color:#fff

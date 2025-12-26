@@ -1,0 +1,223 @@
+graph TB
+    Start([Inputs]) --> AllocInput[FROM: Dynamic Allocation Engine]
+    Start --> MarketData[FROM: Market Data Feeds]
+    Start --> PositionData[FROM: Current Positions]
+    
+    AllocInput --> TargetAlloc[Target Allocation Weights]
+    MarketData --> LivePrices[Live Market Prices]
+    PositionData --> CurrentPos[Current Portfolio Positions]
+    
+    TargetAlloc --> SignalGen[STAGE 1: Signal Generation]
+    
+    subgraph SignalGen[Multi-Strategy Signal Engine]
+        S1[Strategy 1 Signal Logic]
+        S2[Strategy 2 Signal Logic]
+        S3[Strategy 3 Signal Logic]
+        SN[Strategy N Signal Logic]
+        
+        S1 --> RawSignals[Raw Strategy Signals]
+        S2 --> RawSignals
+        S3 --> RawSignals
+        SN --> RawSignals
+    end
+    
+    LivePrices --> SignalGen
+    
+    RawSignals --> SignalProc[STAGE 2: Signal Processing]
+    
+    subgraph SignalProc[Signal Validation & Filtering]
+        ValidCheck[Validity Check: NaN, Inf, Stale]
+        RangeCheck[Range Check: Within Bounds]
+        ConsistCheck[Consistency Check: vs History]
+        
+        ValidCheck --> CleanSignals[Clean Signals]
+        RangeCheck --> CleanSignals
+        ConsistCheck --> CleanSignals
+    end
+    
+    CleanSignals --> Scaling[STAGE 3: Signal Scaling]
+    TargetAlloc --> Scaling
+    
+    subgraph Scaling[Volatility-Adjusted Scaling]
+        VolTarget[Volatility Targeting]
+        RiskParity[Risk Parity Adjustment]
+        CapacityScale[Capacity Scaling]
+        
+        VolTarget --> ScaledSignals[Vol-Scaled Signals]
+        RiskParity --> ScaledSignals
+        CapacityScale --> ScaledSignals
+    end
+    
+    ScaledSignals --> Aggregation[STAGE 4: Signal Aggregation]
+    
+    subgraph Aggregation[Cross-Strategy Aggregation]
+        WeightedAvg[Weighted Average by Allocation]
+        ConflictRes[Conflict Resolution]
+        NetSignal[Net Signal Calculation]
+        
+        WeightedAvg --> AggSignals[Aggregated Signals]
+        ConflictRes --> AggSignals
+        NetSignal --> AggSignals
+    end
+    
+    AggSignals --> PortConstruct[STAGE 5: Portfolio Construction]
+    CurrentPos --> PortConstruct
+    
+    subgraph PortConstruct[Target Portfolio Builder]
+        SignalToPos[Signals → Target Positions]
+        ConstraintApp[Apply Constraints]
+        
+        ConstraintApp --> MaxPosition[Max Position Size: 10%]
+        ConstraintApp --> MaxSector[Max Sector: 25%]
+        ConstraintApp --> MaxSingleName[Max Single Name: 5%]
+        ConstraintApp --> LongShort[Long/Short Balance]
+        ConstraintApp --> Liquidity[Liquidity Requirements]
+        
+        SignalToPos --> TargetPort[Target Portfolio]
+        MaxPosition --> TargetPort
+        MaxSector --> TargetPort
+        MaxSingleName --> TargetPort
+        LongShort --> TargetPort
+        Liquidity --> TargetPort
+    end
+    
+    TargetPort --> Delta[STAGE 6: Delta Calculation]
+    
+    subgraph Delta[Position Delta Analysis]
+        PosDiff[Current vs Target Delta]
+        TxCostCalc[Transaction Cost Estimate]
+        TurnoverCalc[Turnover Calculation]
+        
+        PosDiff --> DeltaVector[Delta Vector]
+        TxCostCalc --> DeltaVector
+        TurnoverCalc --> DeltaVector
+    end
+    
+    DeltaVector --> TurnoverGate{Turnover<br/>Acceptable?}
+    
+    TurnoverGate --> |>30%/day| TurnoverLimit[Apply Turnover Constraint]
+    TurnoverGate --> |OK| RiskGates[STAGE 7: Pre-Trade Risk Gates]
+    
+    TurnoverLimit --> RiskGates
+    
+    subgraph RiskGates[Comprehensive Risk Checks]
+        VaRCheck[VaR Check: <2% Daily]
+        CVaRCheck[CVaR Check: <3% Daily]
+        DrawdownCheck[Drawdown Check: <20%]
+        ConcentrationCheck[Concentration Check]
+        StressTest[Stress Test: 3 Scenarios]
+        CorrelationRisk[Correlation Risk Check]
+        LiquidityRisk[Liquidity Risk Check]
+        
+        VaRCheck --> RiskScore[Risk Score]
+        CVaRCheck --> RiskScore
+        DrawdownCheck --> RiskScore
+        ConcentrationCheck --> RiskScore
+        StressTest --> RiskScore
+        CorrelationRisk --> RiskScore
+        LiquidityRisk --> RiskScore
+    end
+    
+    RiskScore --> RiskGate{All Gates<br/>Pass?}
+    
+    RiskGate --> |Fail| ScaleDown[Scale Down Positions 20%]
+    RiskGate --> |Pass| OrderGen[STAGE 8: Order Generation]
+    
+    ScaleDown --> PortConstruct
+    
+    subgraph OrderGen[Smart Order Creation]
+        OrderSizing[Order Size Calculation]
+        OrderTiming[Timing Optimization]
+        OrderType[Order Type Selection]
+        
+        OrderType --> Market[Market Orders: Urgent]
+        OrderType --> Limit[Limit Orders: Patient]
+        OrderType --> TWAP[TWAP: Large Size]
+        OrderType --> VWAP[VWAP: Benchmark]
+        OrderType --> Iceberg[Iceberg: Hide Size]
+        
+        OrderSizing --> OrderBook[Order Book]
+        OrderTiming --> OrderBook
+        Market --> OrderBook
+        Limit --> OrderBook
+        TWAP --> OrderBook
+        VWAP --> OrderBook
+        Iceberg --> OrderBook
+    end
+    
+    OrderBook --> Batching[STAGE 9: Order Batching]
+    
+    subgraph Batching[Intelligent Batching]
+        GroupByAsset[Group by Asset Class]
+        GroupByLiq[Group by Liquidity]
+        GroupByUrgency[Group by Urgency]
+        
+        GroupByAsset --> Batches[Order Batches]
+        GroupByLiq --> Batches
+        GroupByUrgency --> Batches
+    end
+    
+    Batches --> PreExec[STAGE 10: Pre-Execution Check]
+    
+    subgraph PreExec[Final Validation]
+        BalanceCheck[Balance Check: Sufficient Capital?]
+        MarginCheck[Margin Check: Requirements Met?]
+        RegulatoryCheck[Regulatory Check: Compliant?]
+        SanityCheck[Sanity Check: Reasonable?]
+        
+        BalanceCheck --> PreExecGate{Ready to<br/>Execute?}
+        MarginCheck --> PreExecGate
+        RegulatoryCheck --> PreExecGate
+        SanityCheck --> PreExecGate
+    end
+    
+    PreExecGate --> |Fail| Alert[Alert Trading Desk]
+    PreExecGate --> |Pass| ToExecution[TO: Execution Engine]
+    
+    Alert --> ManualReview[Manual Review Required]
+    ManualReview -.-> ToExecution
+    
+    subgraph StateTracking[State Management]
+        OrderState[Track Order States]
+        PositionState[Track Position States]
+        RiskState[Track Risk States]
+        
+        OrderState --> StateDB[State Database]
+        PositionState --> StateDB
+        RiskState --> StateDB
+    end
+    
+    OrderBook -.-> StateTracking
+    
+    subgraph Performance[System Performance Metrics]
+        SignalQuality[Signal Quality Metrics]
+        TurnoverStats[Turnover Statistics]
+        ConstraintViol[Constraint Violations]
+        
+        SignalQuality --> PerfLog[Performance Log]
+        TurnoverStats --> PerfLog
+        ConstraintViol --> PerfLog
+    end
+    
+    AggSignals -.-> Performance
+    DeltaVector -.-> Performance
+    
+    PerfLog -.-> |Feed Back| Analytics[TO: Performance Analytics]
+    
+    subgraph EmergencyProtocol[Emergency Procedures]
+        EmergencyHalt[Emergency Halt Trigger]
+        EmergencyFlatten[Emergency Flatten Positions]
+        
+        EmergencyHalt --> HaltAll[HALT ALL TRADING]
+        EmergencyFlatten --> FlattenAll[Flatten All Positions]
+    end
+    
+    RiskGate -.-> |Critical Breach| EmergencyProtocol
+    
+    style Start fill:#0066cc,color:#fff
+    style ToExecution fill:#6f42c1,color:#fff
+    style RiskGates fill:#dc3545,color:#fff
+    style OrderBook fill:#28a745,color:#fff
+    style EmergencyProtocol fill:#dc3545,color:#fff
+    style HaltAll fill:#000,color:#fff
+    style FlattenAll fill:#000,color:#fff

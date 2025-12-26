@@ -1,0 +1,270 @@
+graph TB
+    Start([Data Inputs]) --> Sources[Multi-Source Monitoring]
+    
+    subgraph Sources[Alert Data Sources]
+        RegimeData[Regime Detection Engine]
+        PortfolioData[Live Portfolio P&L]
+        StrategyData[Strategy Performance]
+        ExecutionData[Execution Quality]
+        RiskData[Risk Metrics]
+        MarketData[Market Data Anomalies]
+        SystemData[System Health]
+    end
+    
+    RegimeData --> Collectors[Data Collection Layer]
+    PortfolioData --> Collectors
+    StrategyData --> Collectors
+    ExecutionData --> Collectors
+    RiskData --> Collectors
+    MarketData --> Collectors
+    SystemData --> Collectors
+    
+    Collectors --> Monitor[TIER 1: Critical Real-Time Monitoring]
+    
+    subgraph Monitor[Tier 1 Alerts: Immediate Action Required]
+        RegimeShift[Regime Shift Detection]
+        DrawdownBreach[Drawdown Breach: >15%]
+        VaRBreach[VaR Breach: >2x Limit]
+        SystemFailure[System Failure]
+        ExecutionFailure[Execution Failure]
+        MarginCall[Margin Call Risk]
+        
+        RegimeShift --> T1Alerts[Tier 1 Alert Queue]
+        DrawdownBreach --> T1Alerts
+        VaRBreach --> T1Alerts
+        SystemFailure --> T1Alerts
+        ExecutionFailure --> T1Alerts
+        MarginCall --> T1Alerts
+    end
+    
+    subgraph RegimeShiftLogic[Regime Shift Alert Logic]
+        StateChange[Detect State Change]
+        Confidence[Check Confidence Level]
+        Impact[Assess Impact]
+        
+        StateChange --> ShiftType{Shift<br/>Type?}
+        Confidence --> ShiftType
+        Impact --> ShiftType
+        
+        ShiftType --> |Risk-On → Risk-Off| Major1[MAJOR ALERT]
+        ShiftType --> |Any → Crisis| Critical1[CRITICAL ALERT]
+        ShiftType --> |Minor Shift| Minor1[Minor Alert: Log]
+    end
+    
+    Collectors --> Secondary[TIER 2: Performance Monitoring]
+    
+    subgraph Secondary[Tier 2 Alerts: Important but Not Urgent]
+        AlphaDecay[Alpha Decay Detection]
+        UnderPerform[Strategy Underperformance]
+        HighSlippage[High Slippage: >50bps]
+        HighTurnover[Excessive Turnover: >40%]
+        CorrelationSpike[Correlation Spike]
+        CapacityLimit[Capacity Limit Approaching]
+        
+        AlphaDecay --> T2Alerts[Tier 2 Alert Queue]
+        UnderPerform --> T2Alerts
+        HighSlippage --> T2Alerts
+        HighTurnover --> T2Alerts
+        CorrelationSpike --> T2Alerts
+        CapacityLimit --> T2Alerts
+    end
+    
+    subgraph AlphaDecayLogic[Alpha Decay Detection]
+        RollingSharpe[Rolling 90-day Sharpe]
+        RecentPerf[Recent 30-day Performance]
+        Historical[vs Historical Average]
+        
+        RollingSharpe --> DecayTest{Significant<br/>Decay?}
+        RecentPerf --> DecayTest
+        Historical --> DecayTest
+        
+        DecayTest --> |Sharpe drop >50%| High[HIGH Priority]
+        DecayTest --> |Sharpe drop 30-50%| Medium[MEDIUM Priority]
+        DecayTest --> |Sharpe drop <30%| Low[LOW Priority]
+    end
+    
+    Collectors --> Tertiary[TIER 3: Informational Monitoring]
+    
+    subgraph Tertiary[Tier 3 Alerts: FYI / Logging]
+        MinorDeviation[Minor Deviations]
+        HealthScoreChange[Health Score Changes]
+        StrategyCapacity[Strategy Capacity Updates]
+        SystemUpdates[System Updates]
+        
+        MinorDeviation --> T3Alerts[Tier 3 Alert Queue]
+        HealthScoreChange --> T3Alerts
+        StrategyCapacity --> T3Alerts
+        SystemUpdates --> T3Alerts
+    end
+    
+    T1Alerts --> Processing[Alert Processing Engine]
+    T2Alerts --> Processing
+    T3Alerts --> Processing
+    
+    subgraph Processing[Alert Processing Logic]
+        Dedup[Deduplication: Remove Duplicates]
+        Enrichment[Enrichment: Add Context]
+        Prioritization[Re-Prioritization]
+        Aggregation[Aggregation: Related Alerts]
+        
+        Dedup --> ProcessedAlerts[Processed Alerts]
+        Enrichment --> ProcessedAlerts
+        Prioritization --> ProcessedAlerts
+        Aggregation --> ProcessedAlerts
+    end
+    
+    ProcessedAlerts --> Router[Alert Routing Engine]
+    
+    subgraph Router[Intelligent Alert Routing]
+        TierRoute[Route by Tier]
+        TimeRoute[Route by Time of Day]
+        PersonRoute[Route by Alert Type]
+        
+        TierRoute --> Channels[Alert Channels]
+        TimeRoute --> Channels
+        PersonRoute --> Channels
+    end
+    
+    subgraph Channels[Notification Channels]
+        SMS[SMS: Critical Only]
+        Email[Email: All Tiers]
+        Slack[Slack: Tier 1 & 2]
+        Dashboard[Dashboard: All Alerts]
+        PagerDuty[PagerDuty: Emergency]
+        
+        SMS --> Recipients[Alert Recipients]
+        Email --> Recipients
+        Slack --> Recipients
+        Dashboard --> Recipients
+        PagerDuty --> Recipients
+    end
+    
+    Recipients --> Actions[AUTOMATED ACTION ENGINE]
+    
+    subgraph Actions[Automated Response System]
+        Action1[Regime Shift → Trigger Reallocation]
+        Action2[Drawdown Breach → Reduce Risk]
+        Action3[Alpha Decay → Flag Strategy]
+        Action4[High Slippage → Review Execution]
+        Action5[System Failure → Failover]
+        Action6[VaR Breach → Emergency De-Risk]
+        
+        Action1 --> ActionQueue[Action Queue]
+        Action2 --> ActionQueue
+        Action3 --> ActionQueue
+        Action4 --> ActionQueue
+        Action5 --> ActionQueue
+        Action6 --> ActionQueue
+    end
+    
+    ActionQueue --> Executor[Action Executor]
+    
+    subgraph Executor[Execute Remediation]
+        AllocationAdjust[Adjust Allocation Weights]
+        StrategyKill[Kill/Pause Strategy]
+        RiskReduce[Reduce Risk Exposure]
+        SystemRestart[Restart Failed Systems]
+        EmergencyFlatten[Emergency Position Flatten]
+        
+        AllocationAdjust --> ExecutionLog[Execution Log]
+        StrategyKill --> ExecutionLog
+        RiskReduce --> ExecutionLog
+        SystemRestart --> ExecutionLog
+        EmergencyFlatten --> ExecutionLog
+    end
+    
+    ExecutionLog --> Feedback[Action Feedback Loop]
+    
+    subgraph Feedback[Feedback & Learning]
+        SuccessRate[Track Action Success Rate]
+        ResponseTime[Track Response Time]
+        FalsePositive[Track False Positives]
+        
+        SuccessRate --> Learning[Machine Learning Optimizer]
+        ResponseTime --> Learning
+        FalsePositive --> Learning
+    end
+    
+    Learning -.-> |Improve Thresholds| Monitor
+    Learning -.-> |Improve Logic| Secondary
+    
+    subgraph Escalation[Escalation Protocol]
+        Unresolved[Unresolved Alert]
+        Repeated[Repeated Alert: >3x in 1hr]
+        Critical[Critical Impact]
+        
+        Unresolved --> EscalationLevel{Escalation<br/>Level}
+        Repeated --> EscalationLevel
+        Critical --> EscalationLevel
+        
+        EscalationLevel --> L1[Level 1: Automated]
+        EscalationLevel --> L2[Level 2: On-Call Engineer]
+        EscalationLevel --> L3[Level 3: Portfolio Manager]
+        EscalationLevel --> L4[Level 4: CIO/CEO]
+    end
+    
+    ActionQueue -.-> |If Failed| Escalation
+    
+    subgraph Reporting[Alert Reporting & Analytics]
+        DailySummary[Daily Alert Summary]
+        WeeklyAnalysis[Weekly Alert Analysis]
+        MonthlySummary[Monthly Trend Report]
+        
+        DailySummary --> Reports[Alert Reports]
+        WeeklyAnalysis --> Reports
+        MonthlySummary --> Reports
+    end
+    
+    ExecutionLog -.-> Reporting
+    
+    subgraph Tuning[Alert Tuning System]
+        ThresholdOpt[Threshold Optimization]
+        SensitivityAdj[Sensitivity Adjustment]
+        FalsePositiveMin[False Positive Minimization]
+        
+        ThresholdOpt --> TuningOutput[Tuning Recommendations]
+        SensitivityAdj --> TuningOutput
+        FalsePositiveMin --> TuningOutput
+    end
+    
+    Feedback -.-> Tuning
+    TuningOutput -.-> |Monthly Update| Monitor
+    
+    subgraph EmergencyOverride[Emergency Override System]
+        ManualOverride[Manual Override by PM]
+        AlertSuppress[Suppress Specific Alerts]
+        AlertForce[Force Alert for Testing]
+        
+        ManualOverride --> Override[Override Actions]
+        AlertSuppress --> Override
+        AlertForce --> Override
+    end
+    
+    Override -.-> |Control| Processing
+    
+    ExecutionLog --> Output[TO: System Components]
+    
+    subgraph Output[Alert Outputs]
+        ToAllocation[TO: Allocation Engine]
+        ToStrategy[TO: Strategy Pool]
+        ToRisk[TO: Risk Management]
+        ToExecution[TO: Execution Engine]
+        ToMonitoring[TO: Performance Analytics]
+    end
+    
+    Output --> ToAllocation
+    Output --> ToStrategy
+    Output --> ToRisk
+    Output --> ToExecution
+    Output --> ToMonitoring
+    
+    style Start fill:#0066cc,color:#fff
+    style T1Alerts fill:#dc3545,color:#fff
+    style T2Alerts fill:#fd7e14,color:#fff
+    style T3Alerts fill:#17a2b8,color:#fff
+    style Critical1 fill:#000,color:#fff
+    style Major1 fill:#dc3545,color:#fff
+    style EmergencyFlatten fill:#dc3545,color:#fff
+    style PagerDuty fill:#dc3545,color:#fff
+    style L4 fill:#dc3545,color:#fff
+    style Output fill:#6f42c1,color:#fff

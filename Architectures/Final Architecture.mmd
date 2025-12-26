@@ -1,0 +1,247 @@
+graph TB
+    Start([Market Data Feeds<br/>24/7 Multi-Asset]) --> L1[LAYER 1: Intelligence Infrastructure]
+    
+    subgraph L1[Intelligence Infrastructure]
+        DataPipe[Data Pipeline: Clean, Validate, Store]
+        RegimeEngine[Regime Detection Engine]
+        DataPipe --> RegimeEngine
+    end
+    
+    RegimeEngine --> RegimeState{Current Market Regime}
+    
+    RegimeState --> |Tier 1| GlobalMacro[Global: Risk-On/Off/Crisis/Neutral]
+    RegimeState --> |Tier 2| AssetClass[Asset Class: Eq/Bond/FX/Cmdty]
+    RegimeState --> |Tier 3| StratFamily[Strategy: Mom/MR/Carry/Value]
+    
+    GlobalMacro --> RiskDial[Risk Dial: 0.3x - 2.0x Leverage]
+    
+    L1 --> L2[LAYER 2: Strategy Factory]
+    
+    subgraph L2[Continuous Strategy Development]
+        Hypothesis[1. Economic Hypothesis]
+        Features[2. Feature Engineering 500+]
+        Model[3. Model Development]
+        
+        Hypothesis --> Features
+        Features --> Model
+        Model --> Backtest[4. Initial Backtest]
+    end
+    
+    Backtest --> V1{Gate 1:<br/>Statistical Edge?}
+    V1 --> |Sharpe<0.3| Reject1[Reject: Learn & Log]
+    V1 --> |Pass| Validation[5. Rigorous Validation Suite]
+    
+    subgraph Validation[Multi-Dimensional Validation]
+        OOS[Out-of-Sample Test]
+        WalkFwd[Walk-Forward Analysis]
+        Monte[Monte Carlo 10k paths]
+        RegimeStress[Regime Stress Test]
+        ParamRobust[Parameter Robustness]
+        
+        OOS --> VScore[Validation Score]
+        WalkFwd --> VScore
+        Monte --> VScore
+        RegimeStress --> VScore
+        ParamRobust --> VScore
+    end
+    
+    VScore --> V2{Gate 2:<br/>Robust?}
+    V2 --> |Fail| Reject1
+    V2 --> |Pass| TxCost[6. Transaction Cost Reality]
+    
+    subgraph TxCost[Execution Modeling]
+        Costs[Commissions + Fees]
+        Slip[Slippage Models]
+        Impact[Market Impact]
+        Liq[Liquidity Analysis]
+        
+        Costs --> NetPnL[Net Real-World P&L]
+        Slip --> NetPnL
+        Impact --> NetPnL
+        Liq --> NetPnL
+    end
+    
+    NetPnL --> V3{Gate 3:<br/>Still Profitable?}
+    V3 --> |No| Reject1
+    V3 --> |Yes| Review[7. Peer Review + Paper Trade]
+    
+    Review --> Paper[Paper Trading: 3-6 months]
+    Paper --> V4{Gate 4:<br/>Matches Backtest?}
+    V4 --> |No| Reject1
+    V4 --> |Yes| SmallLive[Small Live: 6-12 months]
+    
+    SmallLive --> V5{Gate 5:<br/>Live Validated?}
+    V5 --> |No| Reject1
+    V5 --> |Yes| Approve[APPROVED FOR PRODUCTION]
+    
+    Reject1 -.-> |Track patterns| MetaLearn[Meta-Learning Database]
+    MetaLearn -.-> |Insights| Hypothesis
+    
+    Approve --> L3[LAYER 3: Strategy Pool]
+    
+    subgraph L3[Active Strategy Arsenal: 30-50]
+        Momentum[Momentum Family: 8-12 strats]
+        MeanRev[Mean Reversion: 8-12 strats]
+        Carry[Carry Family: 6-10 strats]
+        Value[Value Family: 6-10 strats]
+        Other[Specialized: 4-8 strats]
+    end
+    
+    AssetClass -.-> |Asset regime signals| L3
+    StratFamily -.-> |Strategy regime signals| L3
+    
+    L3 --> L4[LAYER 4: Dynamic Allocation Engine]
+    
+    subgraph L4[Three-Level Allocation]
+        Level1[Level 1: Global Risk Scaling]
+        Level2[Level 2: Family Weights]
+        Level3[Level 3: Individual Strategy Weights]
+        
+        Level1 --> Combined[Combined Allocation Vector]
+        Level2 --> Combined
+        Level3 --> Combined
+    end
+    
+    RiskDial --> Level1
+    
+    Combined --> L5[LAYER 5: Portfolio Construction]
+    
+    subgraph L5[Position Aggregation]
+        Signals[Aggregate All Signals]
+        VolScale[Volatility Scaling]
+        Constraints[Apply Constraints]
+        
+        Signals --> VolScale
+        VolScale --> Constraints
+        Constraints --> TargetPort[Target Portfolio]
+    end
+    
+    TargetPort --> L6[LAYER 6: Pre-Trade Risk Gates]
+    
+    subgraph L6[Risk Control Checks]
+        VaR[VaR/CVaR Limits]
+        Drawdown[Max Drawdown Check]
+        Concentration[Concentration Limits]
+        Stress[Stress Scenario Tests]
+        Correlation[Correlation Risk]
+        
+        VaR --> RiskPass{All Gates<br/>Pass?}
+        Drawdown --> RiskPass
+        Concentration --> RiskPass
+        Stress --> RiskPass
+        Correlation --> RiskPass
+    end
+    
+    RiskPass --> |Fail| ScaleDown[Scale Down Positions]
+    ScaleDown --> L5
+    RiskPass --> |Pass| L7[LAYER 7: Smart Execution]
+    
+    subgraph L7[Execution Engine]
+        OrderMgmt[Order Management System]
+        MultiBroker[Multi-Broker Routing]
+        Algos[Execution Algorithms]
+        
+        OrderMgmt --> MultiBroker
+        MultiBroker --> Algos
+        Algos --> Fills[Process Fills]
+    end
+    
+    Fills --> L8[LAYER 8: Live Portfolio]
+    
+    L8 --> L9[LAYER 9: Real-Time Monitoring]
+    
+    subgraph L9[Multi-Level Surveillance]
+        PnL[P&L Tracking vs Expected]
+        Alpha[Alpha Decay Detection]
+        Regime[Regime Shift Alerts]
+        Anomaly[Anomaly Detection]
+        Slippage[Slippage Analysis]
+        
+        PnL --> AlertEngine{Alert<br/>Triggered?}
+        Alpha --> AlertEngine
+        Regime --> AlertEngine
+        Anomaly --> AlertEngine
+        Slippage --> AlertEngine
+    end
+    
+    AlertEngine --> |Regime Shift| Emergency1[Trigger Global Reallocation]
+    AlertEngine --> |Alpha Decay| Emergency2[Kill/Reduce Strategy]
+    AlertEngine --> |Drawdown| Emergency3[Emergency De-Risk]
+    AlertEngine --> |Execution Issues| Emergency4[Review Execution Logic]
+    
+    Emergency1 -.-> L4
+    Emergency2 -.-> L3
+    Emergency3 -.-> L6
+    Emergency4 -.-> L7
+    
+    L9 --> L10[LAYER 10: Performance Analytics]
+    
+    subgraph L10[Attribution & Reporting]
+        DailyPnL[Daily P&L Attribution]
+        StratPerf[Strategy-Level Performance]
+        RiskMetrics[Risk Metrics Dashboard]
+        
+        DailyPnL --> Reports[Comprehensive Reports]
+        StratPerf --> Reports
+        RiskMetrics --> Reports
+    end
+    
+    Reports --> L11[LAYER 11: Strategic Review]
+    
+    subgraph L11[Monthly Health Assessment]
+        HealthCalc[Calculate Health Scores 0-100]
+        HealthCalc --> HealthGate{Score<br/>Threshold}
+        
+        HealthGate --> |>70| Scale[Scale Up Allocation]
+        HealthGate --> |50-70| Continue[Continue Current]
+        HealthGate --> |30-50| Reduce[Reduce Allocation]
+        HealthGate --> |<30| Kill[Remove from Pool]
+    end
+    
+    Scale --> L3
+    Continue --> L3
+    Reduce --> L3
+    Kill -.-> |Create gap| L2
+    
+    L11 --> L12[LAYER 12: Quarterly Optimization]
+    
+    subgraph L12[System-Wide Enhancement]
+        ReviewRegime[Review Regime Models]
+        ReviewAlloc[Review Allocation Logic]
+        ReviewExec[Review Execution Quality]
+        ReviewRisk[Review Risk Models]
+        
+        ReviewRegime --> Improvements[System Improvements]
+        ReviewAlloc --> Improvements
+        ReviewExec --> Improvements
+        ReviewRisk --> Improvements
+    end
+    
+    Improvements -.-> |Enhance| L1
+    Improvements -.-> |Optimize| L4
+    Improvements -.-> |Refine| L6
+    
+    subgraph MetaLearning[Meta-Learning Loop]
+        LogAll[Log Everything: Trades, Signals, Regimes]
+        FeatureImp[Feature Importance Analysis]
+        ParamOpt[Optimal Parameter Discovery]
+        
+        LogAll --> FeatureImp
+        FeatureImp --> ParamOpt
+    end
+    
+    L8 -.-> LogAll
+    ParamOpt -.-> |Feed insights| L2
+    
+    style Start fill:#0066cc,color:#fff
+    style Reject1 fill:#6c757d,color:#fff
+    style Approve fill:#28a745,color:#fff
+    style RiskDial fill:#17a2b8,color:#fff
+    style L6 fill:#dc3545,color:#fff
+    style L8 fill:#ffc107,color:#000
+    style L9 fill:#28a745,color:#fff
+    style Scale fill:#28a745,color:#fff
+    style Continue fill:#ffc107,color:#000
+    style Reduce fill:#fd7e14,color:#fff
+    style Kill fill:#dc3545,color:#fff
+    style MetaLearning fill:#6f42c1,color:#fff

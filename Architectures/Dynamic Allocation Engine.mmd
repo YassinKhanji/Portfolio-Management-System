@@ -1,0 +1,204 @@
+graph TB
+    Start([Inputs]) --> RegimeInput[FROM: Regime Detection Engine]
+    Start --> StrategyInput[FROM: Strategy Pool]
+    Start --> PerformanceInput[FROM: Performance Analytics]
+    
+    RegimeInput --> RegimePackage[Regime Package]
+    
+    subgraph RegimePackage[Regime Signals]
+        GlobalState[Global State + Risk Dial]
+        AssetStates[Asset Class States]
+        StrategyScores[Strategy Family Scores]
+        Confidence[Confidence Levels]
+    end
+    
+    StrategyInput --> StrategyData[Strategy Pool Data]
+    
+    subgraph StrategyData[Available Strategies: 30-50]
+        MomStrats[Momentum: 8-12]
+        MRStrats[Mean-Reversion: 8-12]
+        CarryStrats[Carry: 6-10]
+        ValueStrats[Value: 6-10]
+        SpecStrats[Specialized: 4-8]
+        
+        MomStrats --> StratList[Complete Strategy List]
+        MRStrats --> StratList
+        CarryStrats --> StratList
+        ValueStrats --> StratList
+        SpecStrats --> StratList
+    end
+    
+    PerformanceInput --> PerfData[Performance Metrics]
+    
+    subgraph PerfData[Strategy Performance]
+        RecentPerf[Recent Performance: 1-3 months]
+        RollingMetrics[Rolling Sharpe, Sortino, Calmar]
+        Correlations[Inter-Strategy Correlations]
+        Drawdowns[Current Drawdown Status]
+        Capacity[Remaining Capacity]
+    end
+    
+    GlobalState --> Level1[LEVEL 1: Global Risk Scaling]
+    
+    subgraph Level1[Master Risk Control]
+        RiskDialCalc[Risk Dial: 0.3x - 2.0x]
+        EmergencyOverride[Emergency Override Check]
+        MaxDrawdownCheck[Max Drawdown Breached?]
+        
+        RiskDialCalc --> GlobalMultiplier[Global Risk Multiplier]
+        EmergencyOverride --> GlobalMultiplier
+        MaxDrawdownCheck --> GlobalMultiplier
+    end
+    
+    GlobalMultiplier --> Level2[LEVEL 2: Family Allocation]
+    StrategyScores --> Level2
+    
+    subgraph Level2[Strategy Family Weights]
+        RegimeMatch[Regime-Family Matching]
+        FamilyPerf[Family Performance Analysis]
+        DiversBenefit[Diversification Benefit]
+        
+        RegimeMatch --> FamilyOpt[Family Weight Optimization]
+        FamilyPerf --> FamilyOpt
+        DiversBenefit --> FamilyOpt
+        
+        FamilyOpt --> FamilyWeights[Family Weights]
+    end
+    
+    subgraph FamilyWeights[Target Family Allocation]
+        MomWeight[Momentum: X%]
+        MRWeight[Mean-Reversion: Y%]
+        CarryWeight[Carry: Z%]
+        ValueWeight[Value: W%]
+        SpecWeight[Specialized: V%]
+    end
+    
+    FamilyWeights --> Level3[LEVEL 3: Individual Strategy Weights]
+    Correlations --> Level3
+    RecentPerf --> Level3
+    
+    subgraph Level3[Within-Family Allocation]
+        PerfRank[Performance Ranking]
+        CapacityFilter[Capacity Constraints]
+        CorrPenalty[Correlation Penalty]
+        RecencyBias[Recent Performance Bias]
+        
+        PerfRank --> StratOpt[Strategy Optimization]
+        CapacityFilter --> StratOpt
+        CorrPenalty --> StratOpt
+        RecencyBias --> StratOpt
+        
+        StratOpt --> IndivWeights[Individual Strategy Weights]
+    end
+    
+    subgraph OptimizationEngine[Portfolio Optimization]
+        Objective[Objective: Max Risk-Adj Return]
+        Constraints[Constraints]
+        
+        Constraints --> MaxWeight[Max Single Strategy: 15%]
+        Constraints --> MinDiversification[Min 10 Active Strategies]
+        Constraints --> MaxFamily[Max Family Weight: 40%]
+        Constraints --> MaxCorrelation[Max Pairwise Correlation: 0.7]
+        
+        Objective --> Solver[Quadratic Optimizer]
+        MaxWeight --> Solver
+        MinDiversification --> Solver
+        MaxFamily --> Solver
+        MaxCorrelation --> Solver
+    end
+    
+    IndivWeights --> OptimizationEngine
+    
+    Solver --> RawWeights[Raw Optimal Weights]
+    
+    subgraph Adjustments[Real-World Adjustments]
+        Rounding[Round to Tradeable Sizes]
+        TxCostAdj[Transaction Cost Adjustment]
+        TurnoverLimit[Turnover Constraint: <30%/day]
+        
+        Rounding --> AdjWeights[Adjusted Weights]
+        TxCostAdj --> AdjWeights
+        TurnoverLimit --> AdjWeights
+    end
+    
+    RawWeights --> Adjustments
+    
+    AdjWeights --> Combine[COMBINE ALL LEVELS]
+    
+    subgraph Combine[Final Weight Calculation]
+        GlobalMult[× Global Multiplier]
+        FamilyMult[× Family Weight]
+        StratMult[× Strategy Weight]
+        
+        GlobalMult --> FinalCalc[Final Weights = Global × Family × Strategy]
+        FamilyMult --> FinalCalc
+        StratMult --> FinalCalc
+    end
+    
+    GlobalMultiplier --> GlobalMult
+    FamilyWeights --> FamilyMult
+    IndivWeights --> StratMult
+    
+    FinalCalc --> Validation[Weight Validation]
+    
+    subgraph Validation[Sanity Checks]
+        SumCheck[Sum to 100%?]
+        NoNegative[No Negative Weights?]
+        WithinLimits[All Within Limits?]
+        
+        SumCheck --> ValidGate{Pass All<br/>Checks?}
+        NoNegative --> ValidGate
+        WithinLimits --> ValidGate
+    end
+    
+    ValidGate --> |Fail| Rebalance[Force Rebalance]
+    ValidGate --> |Pass| FinalWeights[Final Allocation Vector]
+    
+    Rebalance --> Combine
+    
+    FinalWeights --> Output[Output Package]
+    
+    subgraph Output[Allocation Output]
+        StrategyAlloc[Strategy-Level Allocations]
+        RiskBudget[Risk Budget by Strategy]
+        ExpectedVol[Expected Portfolio Vol]
+        ExpectedCorr[Expected Correlations]
+        TurnoverEst[Estimated Turnover]
+    end
+    
+    Output --> Downstream[TO: Portfolio Construction Engine]
+    Output --> Analytics[TO: Performance Analytics]
+    
+    subgraph Monitoring[Allocation Monitoring]
+        TrackChanges[Track Allocation Changes]
+        RebalanceFreq[Rebalance Frequency Monitor]
+        StabilityCheck[Allocation Stability Check]
+        
+        TrackChanges --> AllocationLog[Allocation History Log]
+        RebalanceFreq --> AllocationLog
+        StabilityCheck --> AllocationLog
+    end
+    
+    FinalWeights -.-> Monitoring
+    AllocationLog -.-> |Feed to| PerformanceInput
+    
+    subgraph EmergencyProtocol[Emergency Reallocation]
+        CrisisDetect[Crisis Regime Detected]
+        DrawdownBreach[Drawdown Limit Breached]
+        
+        CrisisDetect --> EmergencyAlloc[Emergency Allocation]
+        DrawdownBreach --> EmergencyAlloc
+        
+        EmergencyAlloc --> SafeMode[Safe Mode: Min Vol Portfolio]
+    end
+    
+    RegimePackage -.-> |Crisis Alert| EmergencyProtocol
+    Drawdowns -.-> |Breach Alert| EmergencyProtocol
+    SafeMode -.-> |Override| FinalWeights
+    
+    style Start fill:#0066cc,color:#fff
+    style GlobalMultiplier fill:#17a2b8,color:#fff
+    style FinalWeights fill:#28a745,color:#fff
+    style Downstream fill:#6f42c1,color:#fff
+    style SafeMode fill:#dc3545,color:#fff
+    style EmergencyProtocol fill:#dc3545,color:#fff

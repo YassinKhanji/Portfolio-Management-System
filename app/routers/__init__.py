@@ -1,0 +1,7 @@
+"""Router initialization"""
+
+from .rebalancing import router as rebalancing_router
+from .system import router as system_router
+from .portfolio import router as portfolio_router
+
+__all__ = ["rebalancing_router", "system_router", "portfolio_router"]
