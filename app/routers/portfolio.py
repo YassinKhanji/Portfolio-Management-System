@@ -4,16 +4,24 @@ Portfolio Management Router
 Handles portfolio metrics, positions, transactions, and allocation queries.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime, timedelta
 import logging
+from pydantic import BaseModel
 
 from ..models.database import SessionLocal, User, Position, Transaction
+from ..routers.auth import get_current_user, oauth2_scheme
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/api", tags=["portfolio"])
+
+
+# Request Models
+class UpdateRiskProfileRequest(BaseModel):
+    risk_profile: str
 
 
 def get_db():
@@ -42,7 +50,7 @@ async def get_portfolio_metrics(db: Session = Depends(get_db)):
         
         # Calculate total portfolio value from all user positions
         positions = db.query(Position).all()
-        total_value = sum(p.current_value for p in positions if p.current_value)
+        total_value = sum(p.market_value for p in positions if p.market_value)
         
         # Calculate 24h change (simplified - would need price history)
         # TODO: Implement proper 24h change calculation with historical prices
@@ -51,7 +59,7 @@ async def get_portfolio_metrics(db: Session = Depends(get_db)):
         # Get recent transaction count
         yesterday = datetime.utcnow() - timedelta(days=1)
         transactions_24h = db.query(Transaction).filter(
-            Transaction.timestamp >= yesterday
+            Transaction.created_at >= yesterday
         ).count()
         
         return {
@@ -93,20 +101,20 @@ async def get_portfolio_positions(
         if user_id:
             query = query.filter(Position.user_id == user_id)
         
-        positions = query.order_by(Position.current_value.desc()).limit(limit).all()
+        positions = query.order_by(Position.market_value.desc()).limit(limit).all()
         
         result = []
         for pos in positions:
             result.append({
                 "id": pos.id,
                 "symbol": pos.symbol,
-                "name": pos.symbol,  # TODO: Get full name from asset metadata
-                "type": pos.asset_type or "Crypto",
+                "name": pos.symbol,
+                "type": "asset",
                 "balance": pos.quantity,
-                "price": pos.current_price,
-                "value": pos.current_value,
-                "change_24h": pos.change_24h or 0.0,
-                "allocation_percent": pos.allocation_percent or 0.0
+                "price": pos.price,
+                "value": pos.market_value,
+                "change_24h": 0.0,
+                "allocation_percent": pos.allocation_percentage or 0.0
             })
         
         return result
@@ -140,19 +148,19 @@ async def get_portfolio_transactions(
         if user_id:
             query = query.filter(Transaction.user_id == user_id)
         
-        transactions = query.order_by(Transaction.timestamp.desc()).limit(limit).all()
+        transactions = query.order_by(Transaction.created_at.desc()).limit(limit).all()
         
         result = []
         for txn in transactions:
             result.append({
                 "id": txn.id,
                 "asset": txn.symbol,
-                "type": txn.transaction_type,  # buy, sell, rebalance
+                "type": txn.side,
                 "amount": txn.quantity,
                 "price": txn.price,
-                "total": txn.total_value,
-                "timestamp": txn.timestamp.isoformat() + "Z" if txn.timestamp else None,
-                "status": txn.status or "completed"
+                "total": txn.quantity * txn.price,
+                "timestamp": txn.executed_at.isoformat() + "Z" if txn.executed_at else txn.created_at.isoformat() + "Z",
+                "status": txn.status or "pending"
             })
         
         return result
@@ -239,20 +247,14 @@ async def get_portfolio_allocation(
         positions = query.all()
         
         # Calculate total value
-        total_value = sum(p.current_value for p in positions if p.current_value) or 1
+        total_value = sum(p.market_value for p in positions if p.market_value) or 1
         
-        # Group by asset type
-        allocation_by_type = {}
+        # Group by asset type - since asset_class doesn't exist in DB, 
+        # we'll just return by symbol
         allocation_by_asset = []
         
         for pos in positions:
-            asset_type = pos.asset_type or "Crypto"
-            value = pos.current_value or 0
-            
-            # By type
-            if asset_type not in allocation_by_type:
-                allocation_by_type[asset_type] = 0
-            allocation_by_type[asset_type] += value
+            value = pos.market_value or 0
             
             # By asset
             allocation_by_asset.append({
@@ -262,14 +264,7 @@ async def get_portfolio_allocation(
             })
         
         # Convert to list format for frontend
-        allocation_by_type_list = [
-            {
-                "category": asset_type,
-                "value": value,
-                "percent": round(value / total_value * 100, 2)
-            }
-            for asset_type, value in allocation_by_type.items()
-        ]
+        allocation_by_type_list = []
         
         return {
             "by_type": allocation_by_type_list,
@@ -280,3 +275,207 @@ async def get_portfolio_allocation(
     except Exception as e:
         logger.error(f"Failed to fetch allocation data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/risk-metrics")
+async def get_risk_metrics(
+    returnMethod: str = "TWR",
+    period: str = "1Y",
+    lookback: int = 90,
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate risk metrics (Sharpe, Sortino, Calmar ratios, volatility, max drawdown)
+    
+    Args:
+        returnMethod: TWR or MWR
+        period: Return period (1D, 1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y)
+        lookback: Number of days for volatility/risk calculation (30, 90, 365)
+        
+    Returns:
+        Risk metrics including Sharpe ratio, Sortino ratio, Calmar ratio, volatility, max drawdown
+    """
+    try:
+        logger.info(f"Fetching risk metrics (method={returnMethod}, period={period}, lookback={lookback})")
+        
+        # Calculate portfolio returns from snapshots
+        from ..models.database import PortfolioSnapshot
+        from ..core.config import get_settings
+        import numpy as np
+        
+        config = get_settings()
+        lookback_date = datetime.utcnow() - timedelta(days=lookback)
+        
+        # Get portfolio snapshots for lookback period
+        snapshots = db.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.recorded_at >= lookback_date
+        ).order_by(PortfolioSnapshot.recorded_at).all()
+        
+        if len(snapshots) < 2:
+            return {
+                "sharpeRatio": None,
+                "sortinoRatio": None,
+                "calmarRatio": None,
+                "maxDrawdown": None,
+                "volatility": None,
+                "returnPercent": 0,
+                "message": "Insufficient data for metrics"
+            }
+        
+        # Extract daily returns
+        values = [s.total_value for s in snapshots]
+        dates = [s.recorded_at for s in snapshots]
+        
+        # Calculate daily returns
+        returns = []
+        for i in range(1, len(values)):
+            if values[i-1] > 0:
+                daily_return = (values[i] - values[i-1]) / values[i-1]
+                returns.append(daily_return)
+        
+        if not returns:
+            return {
+                "sharpeRatio": None,
+                "sortinoRatio": None,
+                "calmarRatio": None,
+                "maxDrawdown": None,
+                "volatility": None,
+                "returnPercent": 0,
+                "message": "Insufficient data for metrics"
+            }
+        
+        returns_array = np.array(returns)
+        
+        # Calculate metrics
+        total_return_pct = ((values[-1] - values[0]) / values[0]) * 100 if values[0] > 0 else 0
+        daily_volatility = np.std(returns_array)
+        annual_volatility = daily_volatility * np.sqrt(252)  # Annualize
+        
+        # Sharpe ratio (risk-free rate from config)
+        risk_free_rate = config.RISK_FREE_RATE
+        excess_returns = returns_array - (risk_free_rate / 252)
+        sharpe_ratio = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252) if np.std(excess_returns) > 0 else 0
+        
+        # Sortino ratio (only downside volatility)
+        downside_returns = returns_array[returns_array < 0]
+        downside_volatility = np.std(downside_returns) if len(downside_returns) > 0 else 0
+        sortino_ratio = (np.mean(excess_returns) / downside_volatility * np.sqrt(252)) if downside_volatility > 0 else 0
+        
+        # Calmar ratio (return / max drawdown)
+        cumulative_returns = np.cumprod(1 + returns_array)
+        running_max = np.maximum.accumulate(cumulative_returns)
+        drawdown = (cumulative_returns - running_max) / running_max
+        max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0
+        
+        calmar_ratio = (total_return_pct / 100) / abs(max_drawdown) if max_drawdown < 0 else 0
+        
+        return {
+            "returnPercent": round(total_return_pct, 2),
+            "volatility": round(annual_volatility * 100, 2),
+            "sharpeRatio": round(sharpe_ratio, 2),
+            "sortinoRatio": round(sortino_ratio, 2),
+            "calmarRatio": round(calmar_ratio, 2),
+            "maxDrawdown": round(max_drawdown, 4),
+            "lookbackDays": lookback,
+            "snapshotCount": len(snapshots),
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to calculate risk metrics: {str(e)}")
+        return {
+            "sharpeRatio": None,
+            "sortinoRatio": None,
+            "calmarRatio": None,
+            "maxDrawdown": None,
+            "volatility": None,
+            "returnPercent": None,
+            "error": str(e)
+        }
+
+
+@router.get("/portfolio/risk-profile")
+async def get_risk_profile(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get user's current risk profile
+    
+    Args:
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        User's risk profile
+    """
+    try:
+        logger.info(f"Fetching risk profile for user {current_user.email}")
+        
+        return {
+            "id": current_user.id,
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "risk_profile": current_user.risk_profile,
+            "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+            "updated_at": current_user.updated_at.isoformat() if current_user.updated_at else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch risk profile: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch risk profile"
+        )
+
+
+@router.put("/portfolio/risk-profile")
+async def update_risk_profile(
+    request: UpdateRiskProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update user's risk profile (Conservative, Balanced, Aggressive)
+    
+    Args:
+        request: Risk profile update request
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        Updated user information
+    """
+    try:
+        # Validate risk profile
+        valid_profiles = ["Conservative", "Balanced", "Aggressive"]
+        if request.risk_profile not in valid_profiles:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid risk profile. Must be one of: {', '.join(valid_profiles)}"
+            )
+        
+        # Update user's risk profile
+        current_user.risk_profile = request.risk_profile
+        current_user.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(current_user)
+        
+        logger.info(f"Updated risk profile for user {current_user.email}: {request.risk_profile}")
+        
+        return {
+            "id": current_user.id,
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "risk_profile": current_user.risk_profile,
+            "updated_at": current_user.updated_at.isoformat() if current_user.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update risk profile: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update risk profile"
+        )

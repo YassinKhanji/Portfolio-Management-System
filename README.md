@@ -6,7 +6,7 @@ A production-ready automated crypto portfolio management system with regime-base
 
 ### Prerequisites
 - Python 3.9+
-- PostgreSQL 13+
+- Neon Postgres database (connection string)
 - SnapTrade API credentials (for Canadian investment accounts)
 
 ### Installation
@@ -30,7 +30,7 @@ A production-ready automated crypto portfolio management system with regime-base
 4. **Configure Environment**
    ```bash
    cp .env.example .env
-   # Edit .env with your database, API keys, SnapTrade credentials
+   # Edit .env with your Neon DATABASE_URL, API keys, SnapTrade credentials
    ```
 
 5. **Start the Backend**

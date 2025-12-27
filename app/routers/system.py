@@ -17,8 +17,6 @@ import logging
 from datetime import datetime
 
 from ..models.database import SessionLocal, User, SystemStatus as SystemStatusModel
-from ..trading.regime_detection import CryptoRegimeDetector
-from ..trading.traditional_assets_regime import TraditionalAssetsRegimeDetector
 
 router = APIRouter(prefix="/api", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -58,16 +56,7 @@ async def get_regime_status():
     try:
         logger.info("Regime status requested")
         
-        # Get crypto regime
-        crypto_detector = CryptoRegimeDetector()
-        crypto_regimes = crypto_detector.detect_regimes()
-        
-        # Get equities regime
-        equities_detector = TraditionalAssetsRegimeDetector()
-        equities_regime = equities_detector.detect_regime()
-        
-        # For now, return sample data until full implementation
-        # TODO: Parse actual regime data from detectors
+        # TODO: wire real regime detectors; returning stubbed values for now
         response = {
             "crypto": {
                 "season": "BULL",
@@ -142,38 +131,19 @@ async def get_system_health(db: Session = Depends(get_db)):
             database_connected = False
             user_count = 0
         
-        # Check regime engine
-        regime_engine_running = True
-        try:
-            crypto_detector = CryptoRegimeDetector()
-            # Basic check - detector initializes without error
-        except Exception as regime_error:
-            logger.error(f"Regime engine check failed: {str(regime_error)}")
-            regime_engine_running = False
+        # Regime engine not wired yet (crypto-only detector stubbed)
+        regime_engine_running = False
         
-        # Get active users (users who logged in within last 30 days)
-        # TODO: Implement last_login tracking in User model
-        active_users = user_count  # Placeholder
+        # Active users (no last_login tracking yet)
+        active_users = user_count
         
-        # Calculate total AUM
-        # TODO: Sum all user portfolios from SnapTrade
-        total_aum = 0.0  # Placeholder
+        # Total AUM not yet calculated
+        total_aum = None
         
-        # Check emergency stop
-        # TODO: Implement emergency stop state in database
         emergency_stop = False
-        
-        # Market data age
-        # TODO: Check timestamp of last market data update
-        market_data_age_minutes = 15  # Placeholder
-        
-        # Determine overall status
-        if not database_connected or not regime_engine_running:
-            status = "critical"
-        elif market_data_age_minutes > 60:
-            status = "degraded"
-        else:
-            status = "healthy"
+        market_data_age_minutes = None
+
+        status = "healthy" if database_connected else "critical"
         
         health_data = {
             "status": status,
@@ -207,55 +177,6 @@ async def get_system_health(db: Session = Depends(get_db)):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "error": str(e)
         }
-
-
-@router.get("/system/logs")
-            "status": "healthy",
-            "regime_engine": True,
-            "database_connection": True,
-            "market_data_age_minutes": 15,
-            "total_users": 42,
-            "active_users": 35,
-            "total_aum": 5234567.89,
-            "emergency_stop": False,
-            "last_rebalance": "2024-01-15T09:30:00Z"
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/system/logs")
-async def get_system_logs(
-    level: Optional[str] = None,
-    limit: int = 100
-) -> List[dict]:
-    """
-    Get recent system logs.
-    
-    Args:
-        level: Filter by log level (debug, info, warning, error, critical)
-        limit: Max logs to return
-        
-    Returns:
-        List of log entries
-    """
-    try:
-        logger.info(f"Logs requested (level={level}, limit={limit})")
-        
-        # TODO: Query logs from database
-        
-        return [
-            {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "level": "info",
-                "message": "System started",
-                "component": "main"
-            }
-        ]
-    except Exception as e:
-        logger.error(f"Failed to get logs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/system/logs")

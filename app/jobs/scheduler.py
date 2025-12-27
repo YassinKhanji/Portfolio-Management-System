@@ -2,22 +2,27 @@
 Scheduled Jobs Configuration
 
 APScheduler setup for background tasks.
+Based on SYSTEM_SPECIFICATIONS.md
 """
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.jobs import data_refresh, daily_rebalance, health_check
+from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest
+from app.core.config import get_settings
 import logging
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
+settings = get_settings()
 
 
 def add_jobs():
     """Add all scheduled jobs"""
     
-    # Market data refresh: Every 4 hours
+    # ========================================================================
+    # 1. MARKET DATA REFRESH: Every 4 hours
+    # ========================================================================
     scheduler.add_job(
         data_refresh.refresh_market_data,
         CronTrigger(hour="*/4"),
@@ -25,19 +30,63 @@ def add_jobs():
         name="Refresh Market Data",
         replace_existing=True
     )
-    logger.info("✓ Added job: refresh_market_data")
+    logger.info("[OK] Added job: refresh_market_data (every 4 hours)")
     
-    # Portfolio rebalance: Daily at 9:00 AM EST
+    # ========================================================================
+    # 2. PORTFOLIO REBALANCING: 3 times per week (Sunday, Tuesday, Friday)
+    # Starting Sunday 00:00 AM EST
+    # Schedule:
+    #   - Sunday 00:00 AM EST
+    #   - Tuesday 16:00 (4:00 PM) EST
+    #   - Friday 08:00 (8:00 AM) EST
+    # ========================================================================
+    
+    # Sunday 00:00 AM EST
     scheduler.add_job(
         daily_rebalance.rebalance_portfolios,
-        CronTrigger(hour=14, minute=0, day_of_week="mon-fri"),  # 9 AM EST = 2 PM UTC
-        id="daily_rebalance",
-        name="Daily Rebalance",
+        CronTrigger(day_of_week="sun", hour=5, minute=0),  # 00:00 EST = 05:00 UTC
+        id="rebalance_sunday",
+        name="Rebalance Portfolio (Sunday 00:00 EST)",
         replace_existing=True
     )
-    logger.info("✓ Added job: daily_rebalance")
+    logger.info("[OK] Added job: rebalance_portfolios (Sunday 00:00 EST)")
     
-    # System health check: Every hour
+    # Tuesday 16:00 (4:00 PM) EST
+    scheduler.add_job(
+        daily_rebalance.rebalance_portfolios,
+        CronTrigger(day_of_week="tue", hour=21, minute=0),  # 16:00 EST = 21:00 UTC
+        id="rebalance_tuesday",
+        name="Rebalance Portfolio (Tuesday 16:00 EST)",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: rebalance_portfolios (Tuesday 16:00 EST)")
+    
+    # Friday 08:00 (8:00 AM) EST
+    scheduler.add_job(
+        daily_rebalance.rebalance_portfolios,
+        CronTrigger(day_of_week="fri", hour=13, minute=0),  # 08:00 EST = 13:00 UTC
+        id="rebalance_friday",
+        name="Rebalance Portfolio (Friday 08:00 EST)",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: rebalance_portfolios (Friday 08:00 EST)")
+    
+    # ========================================================================
+    # 3. PORTFOLIO SNAPSHOTS: Every 4 hours
+    # Used for performance charts and historical tracking
+    # ========================================================================
+    scheduler.add_job(
+        portfolio_snapshot.create_snapshots,
+        CronTrigger(hour="*/4"),
+        id="portfolio_snapshot",
+        name="Create Portfolio Snapshots",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: portfolio_snapshot (every 4 hours)")
+    
+    # ========================================================================
+    # 4. SYSTEM HEALTH CHECK: Every hour
+    # ========================================================================
     scheduler.add_job(
         health_check.check_system_health,
         CronTrigger(hour="*"),
@@ -45,7 +94,20 @@ def add_jobs():
         name="System Health Check",
         replace_existing=True
     )
-    logger.info("✓ Added job: health_check")
+    logger.info("[OK] Added job: health_check (every hour)")
+    
+    # ========================================================================
+    # 5. DAILY EMAIL DIGEST: Daily at 8:00 AM EST
+    # Sends portfolio summary + alerts to clients
+    # ========================================================================
+    scheduler.add_job(
+        email_digest.send_daily_digest,
+        CronTrigger(hour=13, minute=0),  # 08:00 EST = 13:00 UTC
+        id="daily_email_digest",
+        name="Send Daily Email Digest",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: daily_email_digest (08:00 EST daily)")
 
 
 def start_scheduler():
@@ -53,11 +115,11 @@ def start_scheduler():
     if not scheduler.running:
         add_jobs()
         scheduler.start()
-        logger.info("Background scheduler started")
+        logger.info("[OK] Background scheduler started")
 
 
 def stop_scheduler():
     """Stop background scheduler"""
     if scheduler.running:
         scheduler.shutdown()
-        logger.info("Background scheduler stopped")
+        logger.info("[OK] Background scheduler stopped")

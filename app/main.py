@@ -12,7 +12,13 @@ import logging
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.models.database import init_db
-from app.jobs.scheduler import start_scheduler, stop_scheduler
+try:
+    from app.jobs.scheduler import start_scheduler, stop_scheduler
+except Exception as e:
+    start_scheduler = None  # type: ignore
+    stop_scheduler = None   # type: ignore
+    import warnings
+    warnings.warn(f"Scheduler import failed; background jobs disabled: {e}")
 from app.routers import rebalancing_router, system_router, portfolio_router, auth_router
 
 # Setup logging
@@ -30,15 +36,25 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Portfolio Management Trading System...")
     init_db()
-    start_scheduler()
-    logger.info("✓ System initialized and ready")
+    if start_scheduler is not None:
+        try:
+            start_scheduler()
+        except Exception as se:
+            logger.warning(f"Scheduler failed to start: {se}")
+    else:
+        logger.info("Scheduler disabled; skipping start")
+    logger.info("[OK] System initialized and ready")
     
     yield
     
     # Shutdown
     logger.info("Shutting down...")
-    stop_scheduler()
-    logger.info("✓ System shutdown complete")
+    if stop_scheduler is not None:
+        try:
+            stop_scheduler()
+        except Exception as se:
+            logger.warning(f"Scheduler failed to stop: {se}")
+    logger.info("[OK] System shutdown complete")
 
 
 # Create FastAPI app

@@ -1,0 +1,54 @@
+[project]
+name = "portfolio-management-backend"
+version = "0.1.0"
+description = "Portfolio Management System backend (FastAPI + SQLAlchemy)"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+  { name = "Yassi" }
+]
+
+dependencies = [
+  # Web
+  "fastapi==0.104.1",
+  "uvicorn[standard]==0.24.0",
+  # Config & validation
+  "pydantic==2.12.5",
+  "pydantic-settings==2.6.1",
+  "python-dotenv==1.0.0",
+  "python-multipart==0.0.6",
+  # Database
+  "sqlalchemy==2.0.36",
+  "psycopg2-binary==2.9.11",
+  "alembic==1.12.1",
+  # Data & Analysis
+  "numpy==2.1.3",
+  "pandas==2.2.3",
+  "scipy==1.14.1",
+  # Integrations & HTTP
+  "requests==2.31.0",
+  "httpx==0.25.2",
+  # Scheduling
+  "apscheduler==3.10.4",
+  "tzlocal==5.2",
+  "six==1.16.0",
+  "pyjwt==2.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black==23.12.0",
+  "flake8==6.1.0",
+  "mypy==1.7.1",
+  "pytest==7.4.3",
+  "pytest-asyncio==0.21.1",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = false
+
+# Optional: convenience scripts to run via `uv run -s <name>`

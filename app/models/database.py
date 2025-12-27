@@ -2,23 +2,32 @@
 Database Models
 
 SQLAlchemy ORM models for the shared database between Trading System and Web App.
+Based on SYSTEM_SPECIFICATIONS.md
 
 Tables:
-- Users (user profiles, SnapTrade tokens, risk profiles)
-- Positions (current holdings)
-- Transactions (trade history)
-- Regimes (market regime states)
-- Logs (system logs)
-- Alerts (system alerts and notifications)
+- Users (user profiles, SnapTrade tokens, risk profiles, alert preferences)
+- Connections (SnapTrade account connections - Kraken, Wealthsimple)
+- Positions (current holdings per asset class)
+- PortfolioSnapshots (historical portfolio values for charts - 4 hourly)
+- Transactions (trade execution history - 1 month retention)
+- RiskProfiles (client custom allocations)
+- Regimes (market regime history)
+- Logs (system audit trail - 90 day retention)
+- Alerts (system and user alerts - 30 day retention)
+- AlertPreferences (client notification preferences)
 - SystemStatus (overall system health)
 """
 
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, JSON, Text
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, JSON, Text, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 from typing import Optional
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Database URL (set in environment)
 DATABASE_URL = os.getenv(
@@ -26,7 +35,12 @@ DATABASE_URL = os.getenv(
     "postgresql://user:password@localhost/portfolio_management"
 )
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,
+    max_overflow=5,
+    pool_pre_ping=True,  # Verify connections before reusing
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -38,120 +52,264 @@ class User(Base):
     """User account and preferences"""
     __tablename__ = "users"
     
-    id = Column(String, primary_key=True)  # UUID or SnapTrade user ID
-    email = Column(String, unique=True, nullable=False)
-    password_hash = Column(String, nullable=False)  # Hashed password
+    id = Column(String, primary_key=True)  # UUID
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
     
     # User role and status
-    role = Column(String, default="client")  # admin or client
-    snaptrade_token = Column(String, nullable=True)  # Encrypted (optional if not linked)
-    snaptrade_user_id = Column(String, nullable=True)  # Optional if not linked
-    snaptrade_linked = Column(Boolean, default=False)  # Whether SnapTrade is connected
+    role = Column(String, default="client")  # 'admin' or 'client'
+    active = Column(Boolean, default=True)  # For admin to suspend accounts (named 'active' in DB)
     
-    # User preferences
-    risk_profile = Column(String, default="Balanced")  # Conservative, Balanced, Aggressive
-    rebalance_frequency = Column(String, default="weekly")  # daily, weekly, monthly
+    # SnapTrade integration
+    snaptrade_token = Column(String, nullable=True)
+    snaptrade_user_id = Column(String, nullable=True)
+    snaptrade_linked = Column(Boolean, default=False)
     
-    # Account info
-    active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Risk Profile (Conservative, Balanced, Aggressive)
+    risk_profile = Column(String, default="Balanced")
+    rebalance_frequency = Column(String, default="weekly")
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata_json = Column(JSON, default={})  # Custom user settings
+    
+    # Additional metadata
+    metadata_json = Column(JSON, default={})
+
+
+class Connection(Base):
+    """SnapTrade account connections (Kraken for crypto, Wealthsimple for equities)"""
+    __tablename__ = "connections"
+    
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True)  # Foreign key to users
+    
+    # SnapTrade details
+    snaptrade_user_id = Column(String, nullable=False)
+    snaptrade_user_secret = Column(String, nullable=False)  # Should be encrypted
+    
+    # Account type and broker
+    account_type = Column(String, nullable=False)  # 'crypto' or 'equities'
+    broker = Column(String, nullable=False)  # 'kraken', 'wealthsimple', 'wealthsimple_trade'
+    
+    # Connection status
+    is_connected = Column(Boolean, default=False)
+    connection_status = Column(String, default="pending")  # pending, connected, failed, disconnected
+    
+    # Account details from SnapTrade
+    account_id = Column(String, nullable=True)  # SnapTrade account ID
+    account_balance = Column(Float, default=0.0)  # Current balance
+    balance_currency = Column(String, default="CAD")  # Currency of account
+    
+    # Timestamps
+    connected_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Position(Base):
-    """Current portfolio holdings"""
+    """Current portfolio holdings per asset class"""
     __tablename__ = "positions"
     
-    id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)  # Foreign key to users
-    symbol = Column(String, nullable=False)  # e.g., "BTC.X", "ETH.X"
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True)
+    
+    # Asset details
+    symbol = Column(String, nullable=False)  # 'BTC', 'ETH', 'AAPL', etc.
+    
+    # Position data
     quantity = Column(Float, nullable=False)
-    price = Column(Float, nullable=False)  # Current price
-    market_value = Column(Float, nullable=False)  # quantity * price
+    price = Column(Float, nullable=False)  # Current price in CAD
+    market_value = Column(Float, nullable=False)  # quantity * price in CAD
     
     # Allocation tracking
-    target_percentage = Column(Float, nullable=False)
-    allocation_percentage = Column(Float, nullable=False)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata_json = Column(JSON, default={})
-
-
-class Transaction(Base):
-    """Trade execution history"""
-    __tablename__ = "transactions"
-    
-    id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)  # Foreign key to users
-    
-    # Trade details
-    symbol = Column(String, nullable=False)
-    quantity = Column(Float, nullable=False)
-    price = Column(Float, nullable=False)
-    side = Column(String, nullable=False)  # BUY or SELL
-    
-    # Status tracking
-    status = Column(String, default="pending")  # pending, executed, failed
-    snaptrade_order_id = Column(String, nullable=True)
+    allocation_percentage = Column(Float, default=0.0)
+    target_percentage = Column(Float, default=0.0)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
-    executed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    
+    # Metadata
     metadata_json = Column(JSON, default={})
+
+
+class PortfolioSnapshot(Base):
+    """Historical portfolio values for performance charts - taken every 4 hours"""
+    __tablename__ = "portfolio_snapshots"
+    
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True)
+    
+    # Portfolio totals
+    total_value = Column(Float, nullable=False)  # Total portfolio value in CAD
+    crypto_value = Column(Float, default=0.0)
+    stocks_value = Column(Float, default=0.0)
+    cash_value = Column(Float, default=0.0)
+    
+    # Returns
+    daily_return = Column(Float, default=0.0)  # Daily P&L in CAD
+    daily_return_pct = Column(Float, default=0.0)  # Daily return percentage
+    
+    # Positions snapshot (JSON for easy historical access)
+    positions_snapshot = Column(JSON, default={})  # {"BTC": {...}, "ETH": {...}, ...}
+    
+    # Allocation snapshot
+    allocation_snapshot = Column(JSON, default={})  # {"crypto": 0.20, "stocks": 0.60, "cash": 0.20}
+    
+    # Timestamp (in user's local timezone)
+    recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # For aggregation
+    aggregation_level = Column(String, default="4h")  # 4h, daily, weekly (after 90 days)
+
+
+class Transaction(Base):
+    """Trade execution history - kept for 1 month"""
+    __tablename__ = "transactions"
+    
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True)
+    
+    # Trade details
+    symbol = Column(String, nullable=False)
+    
+    # Order details
+    quantity = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)  # Execution price in original currency
+    side = Column(String, nullable=False)  # 'BUY' or 'SELL'
+    
+    # SnapTrade tracking
+    snaptrade_order_id = Column(String, nullable=True, index=True)
+    status = Column(String, default="pending")  # pending, filled, partially_filled, failed, cancelled
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    executed_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    metadata_json = Column(JSON, default={})
+
+
+class RiskProfile(Base):
+    """Client custom allocation settings"""
+    __tablename__ = "risk_profiles"
+    
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True, unique=True)
+    
+    # Allocation: [Crypto, Stocks, Gold/Cash]
+    crypto_allocation = Column(Float, nullable=False)  # 0.0 to 1.0
+    stocks_allocation = Column(Float, nullable=False)  # 0.0 to 1.0
+    cash_allocation = Column(Float, nullable=False)  # 0.0 to 1.0
+    
+    # Additional settings
+    questionnaire_responses = Column(JSON, default={})  # Store answers to risk questionnaire
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Regime(Base):
     """Market regime history"""
     __tablename__ = "regimes"
     
-    id = Column(String, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    id = Column(String, primary_key=True)  # UUID
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     
-    # Regime detection
-    season = Column(String, nullable=False)  # BULL, BEAR, SIDEWAYS, HODL
-    vol_regime = Column(Integer, nullable=False)  # 0, 1, 2
-    dir_regime = Column(Integer, nullable=False)  # 0, 1, 2
-    confidence = Column(Float, default=0.8)
+    # Crypto regime (from regime detection model)
+    crypto_regime = Column(String, nullable=False)  # HODL, Risk Off, BTC Season, Altcoin Season, Risk On
+    crypto_confidence = Column(Float, default=0.0)
     
-    metadata_json = Column(JSON, default={})  # BTC, ETH details
+    # Equities regime (to be implemented)
+    equities_regime = Column(String, nullable=True)  # BULL, BEAR, CORRECTION, etc.
+    equities_confidence = Column(Float, default=0.0)
+    
+    # Combined signal
+    combined_signal = Column(String, nullable=True)
+    
+    # Detailed metrics (JSON)
+    indicators = Column(JSON, default={})  # All calculated indicators
 
 
 class Log(Base):
-    """System audit trail"""
+    """System audit trail - 90 day retention"""
     __tablename__ = "logs"
     
-    id = Column(String, primary_key=True)
+    id = Column(String, primary_key=True)  # UUID
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    level = Column(String, nullable=False)  # debug, info, warning, error, critical
+    
+    # Log details
+    level = Column(String, nullable=False)  # 'debug', 'info', 'warning', 'error', 'critical'
     message = Column(Text, nullable=False)
-    component = Column(String, nullable=False)  # Which system component
-    user_id = Column(String, nullable=True)  # Optional: which user
+    component = Column(String, nullable=False)  # e.g., 'auth', 'rebalancing', 'snaptrade'
+    
+    # Associated entities
+    user_id = Column(String, nullable=True, index=True)  # Audit: which user triggered this
+    admin_action = Column(Boolean, default=False)  # Is this an admin action?
+    
+    # Exception details
+    traceback = Column(Text, nullable=True)  # Full stack trace (for admins only)
+    
+    # Additional context
     metadata_json = Column(JSON, default={})
 
 
 class Alert(Base):
-    """System and user alerts"""
+    """System and user alerts - 30 day retention for unread alerts"""
     __tablename__ = "alerts"
     
-    id = Column(String, primary_key=True)
+    id = Column(String, primary_key=True)  # UUID
     
-    # Alert metadata
-    alert_type = Column(String, nullable=False)  # rebalance_needed, trade_failed, regime_change, drift_alert, data_refresh_failed
-    severity = Column(String, nullable=False)  # info, warning, critical
+    # Alert classification
+    alert_type = Column(String, nullable=False, index=True)  # rebalance_completed, regime_change, etc.
+    severity = Column(String, nullable=False)  # 'info', 'warning', 'critical', 'emergency'
     message = Column(Text, nullable=False)
     
     # Assignment
-    user_id = Column(String, nullable=True)  # null = system-wide alert
-    read = Column(Boolean, default=False)
+    user_id = Column(String, nullable=True, index=True)  # NULL = system-wide alert
+    
+    # Status
+    is_read = Column(Boolean, default=False, index=True)
     action_required = Column(Boolean, default=False)
+    
+    # Email sent?
+    email_sent = Column(Boolean, default=False)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    read_at = Column(DateTime, nullable=True)
+    
+    # Additional context
     metadata_json = Column(JSON, default={})
+
+
+class AlertPreference(Base):
+    """Client notification preferences"""
+    __tablename__ = "alert_preferences"
+    
+    id = Column(String, primary_key=True)  # UUID
+    user_id = Column(String, nullable=False, index=True, unique=True)
+    
+    # Alert type preferences (opt-in/out)
+    rebalance_completed = Column(Boolean, default=True)
+    regime_change = Column(Boolean, default=True)
+    emergency_stop = Column(Boolean, default=True)
+    transfer_needed = Column(Boolean, default=True)
+    drawdown_warning = Column(Boolean, default=True)
+    health_check_failed = Column(Boolean, default=False)  # Mostly for admins
+    api_error = Column(Boolean, default=False)  # Mostly for admins
+    
+    # Notification methods
+    email_enabled = Column(Boolean, default=True)
+    daily_digest_enabled = Column(Boolean, default=True)
+    daily_digest_time = Column(String, default="08:00")  # HH:MM format, EST
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SystemStatus(Base):
@@ -160,37 +318,32 @@ class SystemStatus(Base):
     
     id = Column(String, primary_key=True, default="system")
     
-    # Component status
-    regime_engine = Column(Boolean, default=True)
-    database_connection = Column(Boolean, default=True)
+    # Component health
+    database_connected = Column(Boolean, default=True)
+    snaptrade_api_available = Column(Boolean, default=True)
+    market_data_available = Column(Boolean, default=True)
     
-    # Market data
-    market_data_age_minutes = Column(Integer, default=0)
-    market_data_last_updated = Column(DateTime, nullable=True)
+    # Last update timestamps
+    last_market_data_refresh = Column(DateTime, nullable=True)
+    last_health_check = Column(DateTime, nullable=True)
+    last_rebalance = Column(DateTime, nullable=True)
     
-    # User metrics
+    # Current regime
+    current_crypto_regime = Column(String, nullable=True)
+    current_equities_regime = Column(String, nullable=True)
+    
+    # Trading state
+    emergency_stop_active = Column(Boolean, default=False)
+    emergency_stop_reason = Column(String, nullable=True)
+    emergency_stop_triggered_at = Column(DateTime, nullable=True)
+    
+    # Metrics
     total_users = Column(Integer, default=0)
     active_users = Column(Integer, default=0)
     total_aum = Column(Float, default=0.0)  # Total Assets Under Management
     
-    # Trading status
-    emergency_stop = Column(Boolean, default=False)
-    last_rebalance = Column(DateTime, nullable=True)
-    
+    # Last update
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata_json = Column(JSON, default={})
-
-
-class WebAppSession(Base):
-    """Frontend user sessions"""
-    __tablename__ = "web_app_sessions"
-    
-    id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)
-    token = Column(String, nullable=False, unique=True)
-    expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_activity = Column(DateTime, default=datetime.utcnow)
 
 
 # ============================================================================

@@ -4,7 +4,12 @@ Portfolio Calculator Module
 Calculate optimal portfolio allocations based on market regime.
 """
 
-from allocation import AllocationStrategy, REGIME_OBJECTIVES, REGIME_CONSTRAINTS
+try:
+    from allocation import AllocationStrategy, REGIME_OBJECTIVES, REGIME_CONSTRAINTS
+    ALLOCATION_AVAILABLE = True
+except ImportError:
+    ALLOCATION_AVAILABLE = False
+    
 import logging
 from typing import Dict
 
@@ -15,7 +20,11 @@ class PortfolioCalculator:
     """Portfolio allocation calculator"""
     
     def __init__(self):
-        self.strategy = AllocationStrategy()
+        if ALLOCATION_AVAILABLE:
+            self.strategy = AllocationStrategy()
+        else:
+            self.strategy = None
+            logger.warning("AllocationStrategy unavailable; calculator running in mock mode")
     
     def calculate_target_allocation(
         self,
@@ -34,6 +43,10 @@ class PortfolioCalculator:
         Returns:
             Dict with symbol -> target_amount
         """
+        if not ALLOCATION_AVAILABLE:
+            logger.warning("AllocationStrategy unavailable; returning empty allocation")
+            return {}
+            
         try:
             logger.info(f"Calculating allocation: {regime}/{risk_profile}")
             

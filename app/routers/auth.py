@@ -18,11 +18,11 @@ from ..models.database import SessionLocal, User
 from ..core.config import get_settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/api", tags=["auth"])
 settings = get_settings()
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing (support both bcrypt and pbkdf2-sha256)
+pwd_context = CryptContext(schemes=["bcrypt", "pbkdf2_sha256"], deprecated="auto")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
@@ -182,21 +182,21 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+async def login(login_data: UserLogin, db: Session = Depends(get_db)):
     """
     Login with email and password
     
     Args:
-        form_data: OAuth2 form with username (email) and password
+        login_data: User login data (email and password)
         
     Returns:
         JWT access token and user info
     """
     try:
-        logger.info(f"Login attempt for email: {form_data.username}")
+        logger.info(f"Login attempt for email: {login_data.email}")
         
         # Authenticate user
-        user = authenticate_user(db, form_data.username, form_data.password)
+        user = authenticate_user(db, login_data.email, login_data.password)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

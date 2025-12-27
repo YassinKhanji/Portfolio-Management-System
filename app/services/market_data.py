@@ -4,7 +4,10 @@ Market Data Service
 Fetch and cache market data from CCXT/Kraken and yfinance.
 """
 
-from app.trading.regime_detection import CryptoRegimeDetector
+try:
+    from app.trading.regime_detection import CryptoRegimeDetector
+except Exception:
+    CryptoRegimeDetector = None  # type: ignore
 import logging
 from datetime import datetime
 from typing import Optional
@@ -16,7 +19,12 @@ class MarketDataService:
     """Manage market data fetching and caching"""
     
     def __init__(self):
-        self.crypto_detector = CryptoRegimeDetector(lookback_periods=365 * 15)
+        self.crypto_detector = None
+        if CryptoRegimeDetector is not None:
+            try:
+                self.crypto_detector = CryptoRegimeDetector(lookback_periods=365 * 15)
+            except Exception as e:
+                logger.warning(f"Failed to initialize CryptoRegimeDetector: {e}")
         self.last_refresh = None
         self.cached_data = None
     
@@ -40,8 +48,12 @@ class MarketDataService:
                     logger.info(f"Using cached data (age: {age_minutes:.0f}m)")
                     return self.cached_data
             
-            # Fetch new data
-            self.cached_data = self.model.run()
+            # Fetch new data via detector/model if available
+            if self.crypto_detector is not None and hasattr(self.crypto_detector, "run"):
+                self.cached_data = self.crypto_detector.run()
+            else:
+                logger.info("No crypto regime detector available; skipping data fetch")
+                self.cached_data = self.cached_data or None
             self.last_refresh = datetime.utcnow()
             
             logger.info("Market data refreshed successfully")

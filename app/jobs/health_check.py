@@ -4,7 +4,7 @@ Health Check Job
 Monitors system health and creates alerts for issues.
 """
 
-from app.models.database import Session, SystemStatus, Alert, Log
+from app.models.database import SessionLocal, SystemStatus, Alert, Log
 from datetime import datetime
 import logging
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def check_system_health():
     """Check system health and database connectivity"""
     
-    db = Session()
+    db = SessionLocal()
     
     try:
         # Get current timestamp

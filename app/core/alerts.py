@@ -4,7 +4,7 @@ Alert Management
 Helper functions for creating and managing alerts.
 """
 
-from app.models.database import Session, Alert
+from app.models.database import SessionLocal, Alert
 from datetime import datetime
 from enum import Enum
 import logging
@@ -40,7 +40,7 @@ def create_alert(
 ) -> Alert:
     """Create and store an alert"""
     
-    db = Session()
+    db = SessionLocal()
     
     try:
         alert = Alert(
@@ -69,7 +69,7 @@ def create_alert(
 def get_unread_alerts(user_id: int = None, limit: int = 10) -> list:
     """Get unread alerts"""
     
-    db = Session()
+    db = SessionLocal()
     
     try:
         query = db.query(Alert).filter(Alert.read == False)
@@ -92,7 +92,7 @@ def get_unread_alerts(user_id: int = None, limit: int = 10) -> list:
 def mark_alert_read(alert_id: int):
     """Mark alert as read"""
     
-    db = Session()
+    db = SessionLocal()
     
     try:
         alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -112,7 +112,7 @@ def mark_alert_read(alert_id: int):
 def dismiss_alert(alert_id: int):
     """Dismiss alert (delete from active alerts)"""
     
-    db = Session()
+    db = SessionLocal()
     
     try:
         alert = db.query(Alert).filter(Alert.id == alert_id).first()

@@ -1,4 +1,6 @@
 """
+DEPRECATED NOTE: This document contained multi-asset scaffolding that has been removed. The current system is crypto-only (see regime_detection.py/allocation.py/executor.py). Sections below referencing traditional assets and orchestrators are legacy and kept for reference only.
+
 MULTI-ASSET PORTFOLIO SYSTEM - QUICK REFERENCE
 
 This document provides a quick overview of the system architecture and

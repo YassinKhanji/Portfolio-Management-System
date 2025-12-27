@@ -4,7 +4,7 @@ Daily Rebalance Job
 Rebalances all user portfolios based on current regime.
 """
 
-from app.models.database import Session, User, Position, Alert, Log
+from app.models.database import SessionLocal, User, Position, Alert, Log
 from app.trading.portfolio_calculator import PortfolioCalculator
 from app.trading.executor import TradeExecutor
 from datetime import datetime
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def rebalance_portfolios():
     """Rebalance all active portfolios"""
     
-    db = Session()
+    db = SessionLocal()
     rebalanced_count = 0
     error_count = 0
     
@@ -52,7 +52,7 @@ def rebalance_portfolios():
                     executor.execute_trades(required_trades, user.id)
                     
                     rebalanced_count += 1
-                    logger.info(f"✓ Rebalanced portfolio for user {user.id}")
+                    logger.info(f"[OK] Rebalanced portfolio for user {user.id}")
                 
             except Exception as e:
                 error_count += 1

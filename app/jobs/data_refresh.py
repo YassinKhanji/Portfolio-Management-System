@@ -4,9 +4,16 @@ Data Refresh Job
 Refreshes market data and regime information.
 """
 
-from app.services.market_data import MarketDataService
-from app.trading.regime_detection import RegimeDetectionService
-from app.models.database import Session, Log, Alert
+try:
+    from app.services.market_data import MarketDataService
+except Exception:
+    MarketDataService = None  # type: ignore
+
+try:
+    from app.trading.regime_detection import RegimeDetectionService
+except Exception:
+    RegimeDetectionService = None  # type: ignore
+from app.models.database import SessionLocal, Log, Alert
 from datetime import datetime
 import logging
 
@@ -17,18 +24,33 @@ def refresh_market_data():
     """Refresh market data and detect regime changes"""
     
     try:
-        db = Session()
+        db = SessionLocal()
         
-        # Refresh market data
-        market_data_service = MarketDataService()
-        market_data_service.refresh_market_data()
+        # Refresh market data (if service available)
+        if MarketDataService is not None:
+            market_data_service = MarketDataService()
+            try:
+                market_data_service.refresh_market_data()
+            except Exception as me:
+                logger.warning(f"Market data service failed: {me}")
+        else:
+            logger.warning("MarketDataService unavailable; skipping market data refresh")
         
         # Detect regime changes
-        regime_service = RegimeDetectionService()
-        regime_changed = regime_service.is_regime_changed()
+        regime_changed = False
+        latest_regime = None
+        if RegimeDetectionService is not None:
+            try:
+                regime_service = RegimeDetectionService()
+                regime_changed = regime_service.is_regime_changed()
+                if regime_changed:
+                    latest_regime = regime_service.get_latest_regime()
+            except Exception as re:
+                logger.warning(f"Regime detection failed: {re}")
+        else:
+            logger.info("RegimeDetectionService unavailable; skipping regime detection")
         
         if regime_changed:
-            latest_regime = regime_service.get_latest_regime()
             logger.warning(f"REGIME CHANGE DETECTED: {latest_regime}")
             
             # Create alert for regime change
@@ -47,7 +69,7 @@ def refresh_market_data():
             level="info",
             message="Market data refreshed successfully",
             component="data_refresh_job",
-            metadata_json={"regime_changed": regime_changed}
+            metadata_json={"regime_changed": regime_changed, "latest_regime": latest_regime}
         )
         db.add(log)
         db.commit()
@@ -59,7 +81,7 @@ def refresh_market_data():
         
         # Log the error
         try:
-            db = Session()
+            db = SessionLocal()
             log = Log(
                 timestamp=datetime.utcnow(),
                 level="error",
