@@ -5,6 +5,7 @@ Execute trades via SnapTrade API.
 """
 
 from app.services.snaptrade_integration import SnapTradeClient, SnapTradeClientError
+from app.jobs.utils import is_emergency_stop_active
 import logging
 from typing import Dict, List
 
@@ -36,6 +37,10 @@ class TradeExecutor:
         executed = []
         
         try:
+            if is_emergency_stop_active():
+                logger.error("Emergency stop active; aborting trade execution")
+                raise RuntimeError("Trading halted: emergency_stop is active")
+
             logger.info(f"Executing {len(trades)} trades for account {account_id}...")
             
             for symbol, trade_info in trades.items():
@@ -98,6 +103,9 @@ class TradeExecutor:
     def cancel_trade(self, account_id: str, order_id: str) -> bool:
         """Cancel a pending order"""
         try:
+            if is_emergency_stop_active():
+                logger.error("Emergency stop active; cancel order skipped")
+                raise RuntimeError("Trading halted: emergency_stop is active")
             return self.client.cancel_order(account_id, order_id)
         except SnapTradeClientError as e:
             logger.error(f"Failed to cancel order: {str(e)}")

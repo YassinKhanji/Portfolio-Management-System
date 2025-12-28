@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Optional
 import os
 from dotenv import load_dotenv
+import uuid
 
 # Load environment variables from .env file
 load_dotenv()
@@ -52,7 +53,7 @@ class User(Base):
     """User account and preferences"""
     __tablename__ = "users"
     
-    id = Column(String, primary_key=True)  # UUID
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))  # UUID
     email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
@@ -319,7 +320,7 @@ class SystemStatus(Base):
     id = Column(String, primary_key=True, default="system")
     
     # Component health
-    database_connected = Column(Boolean, default=True)
+    database_connection = Column(Boolean, default=True)
     snaptrade_api_available = Column(Boolean, default=True)
     market_data_available = Column(Boolean, default=True)
     

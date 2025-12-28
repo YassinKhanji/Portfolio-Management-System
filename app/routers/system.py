@@ -12,11 +12,14 @@ Endpoints:
 
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Optional
+from pathlib import Path
+import itertools
 from sqlalchemy.orm import Session
 import logging
 from datetime import datetime
 
-from ..models.database import SessionLocal, User, SystemStatus as SystemStatusModel
+from ..models.database import SessionLocal, User, Connection, Position, Log, SystemStatus as SystemStatusModel
+from ..jobs.scheduler import start_scheduler, stop_jobs_for_emergency
 
 router = APIRouter(prefix="/api", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -136,11 +139,13 @@ async def get_system_health(db: Session = Depends(get_db)):
         
         # Active users (no last_login tracking yet)
         active_users = user_count
-        
-        # Total AUM not yet calculated
+
+        # Total AUM placeholder (not yet calculated)
         total_aum = None
-        
-        emergency_stop = False
+
+        # Pull current emergency stop state
+        system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
+        emergency_stop = bool(system_status and system_status.emergency_stop_active)
         market_data_age_minutes = None
 
         status = "healthy" if database_connected else "critical"
@@ -182,44 +187,87 @@ async def get_system_health(db: Session = Depends(get_db)):
 @router.get("/system/logs")
 async def get_system_logs(
     level: Optional[str] = None,
+    component: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = 100
 ):
     """
-    Get recent system logs.
-    
+    Get recent system logs from rotating log files.
+
     Args:
         level: Filter by log level (debug, info, warning, error, critical)
-        limit: Maximum number of logs to return
-        
+        component: Filter by logger name/component substring
+        q: Full-text search on message
+        limit: Maximum number of log lines (cap at 500)
+
     Returns:
-        List of log entries
+        List of log entries sorted newest-first
     """
     try:
-        logger.info(f"Logs requested (level={level}, limit={limit})")
-        
-        # TODO: Query logs from database or log file
-        # For now, return sample logs
-        
-        sample_logs = [
-            {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "level": "info",
-                "message": "System health check completed",
-                "component": "system"
-            },
-            {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "level": "info",
-                "message": "Regime detection completed: BULL",
-                "component": "regime_detection"
-            }
+        max_limit = 500
+        limit = max(1, min(limit, max_limit))
+
+        log_dir = Path("logs")
+        log_files = [
+            log_dir / "app.log",
+            log_dir / "error.log",
+            log_dir / "jobs.log",
         ]
-        
-        return sample_logs[:limit]
-        
+
+        entries: List[dict] = []
+
+        def parse_line(line: str):
+            """Parse log line from formatter: %(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"""
+            try:
+                parts = line.strip().split(" - ", 4)
+                if len(parts) < 5:
+                    return None
+                ts_raw, logger_name, levelname, location, message = parts
+                # Convert timestamp to ISO-like string
+                ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S,%f")
+                return {
+                    "timestamp": ts.isoformat() + "Z",
+                    "level": levelname.lower(),
+                    "component": logger_name,
+                    "location": location.strip("[]"),
+                    "message": message,
+                }
+            except Exception:
+                return None
+
+        for file_path in log_files:
+            if not file_path.exists():
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception as fe:
+                logger.warning(f"Failed reading log file {file_path}: {fe}")
+                continue
+            for line in lines[-1000:]:  # read last 1000 lines per file to stay bounded
+                parsed = parse_line(line)
+                if not parsed:
+                    continue
+                entries.append(parsed)
+
+        # Apply filters
+        if level:
+            level_lower = level.lower()
+            entries = [e for e in entries if e["level"] == level_lower]
+        if component:
+            comp_lower = component.lower()
+            entries = [e for e in entries if comp_lower in e.get("component", "").lower()]
+        if q:
+            q_lower = q.lower()
+            entries = [e for e in entries if q_lower in e.get("message", "").lower()]
+
+        # Sort newest first by timestamp
+        entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        return entries[:limit]
+
     except Exception as e:
-        logger.error(f"Failed to fetch logs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to fetch logs: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch logs")
 
 
 @router.get("/system/alerts")
@@ -274,13 +322,17 @@ async def emergency_stop(reason: str = "Manual admin stop", db: Session = Depend
         # Update system status in database
         system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
         if not system_status:
-            system_status = SystemStatusModel(id="system", emergency_stop=True)
-        
-        system_status.emergency_stop = True
-        system_status.updated_at = datetime.utcnow()
+            system_status = SystemStatusModel(id="system")
+
+        now = datetime.utcnow()
+        system_status.emergency_stop_active = True
+        system_status.emergency_stop_reason = reason
+        system_status.emergency_stop_triggered_at = now
+        system_status.updated_at = now
         
         db.add(system_status)
         db.commit()
+        stop_jobs_for_emergency(reason)
         
         logger.warning(f"Emergency stop activated: {reason}")
         
@@ -288,7 +340,7 @@ async def emergency_stop(reason: str = "Manual admin stop", db: Session = Depend
             "status": "stopped",
             "reason": reason,
             "emergency_stop": True,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": now.isoformat() + "Z"
         }
     except Exception as e:
         logger.error(f"Emergency stop failed: {str(e)}")
@@ -310,20 +362,24 @@ async def emergency_stop_reset(db: Session = Depends(get_db)):
         # Clear emergency stop flag in database
         system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
         if not system_status:
-            system_status = SystemStatusModel(id="system", emergency_stop=False)
-        
-        system_status.emergency_stop = False
-        system_status.updated_at = datetime.utcnow()
+            system_status = SystemStatusModel(id="system")
+
+        now = datetime.utcnow()
+        system_status.emergency_stop_active = False
+        system_status.emergency_stop_reason = None
+        system_status.emergency_stop_triggered_at = None
+        system_status.updated_at = now
         
         db.add(system_status)
         db.commit()
+        start_scheduler()
         
         logger.warning("Emergency stop has been RESET - trading resumed")
         
         return {
             "status": "resumed",
             "emergency_stop": False,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": now.isoformat() + "Z"
         }
     except Exception as e:
         logger.error(f"Emergency stop reset failed: {str(e)}")

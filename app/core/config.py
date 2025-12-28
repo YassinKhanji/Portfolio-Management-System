@@ -6,6 +6,7 @@ Based on SYSTEM_SPECIFICATIONS.md
 """
 
 from pydantic_settings import BaseSettings
+import json
 from functools import lru_cache
 import os
 from typing import List
@@ -45,14 +46,24 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # Access token: 30 minutes
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh token: 7 days
     JWT_REMEMBER_ME_EXPIRE_DAYS: int = 30  # "Remember me" token: 30 days
+    ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
     
     # ============================================================================
     # CORS Configuration
     # ============================================================================
-    CORS_ORIGINS: List[str] = os.getenv(
+    # Support JSON array or comma-separated string from environment
+    _raw_cors = os.getenv(
         "CORS_ORIGINS",
         "http://localhost:5173,http://localhost:3000,https://your-vercel-app.vercel.app"
-    ).split(",")
+    )
+    try:
+        CORS_ORIGINS: List[str] = (
+            json.loads(_raw_cors)
+            if _raw_cors.strip().startswith("[")
+            else [o.strip().strip('"').strip("'") for o in _raw_cors.split(",") if o.strip()]
+        )
+    except Exception:
+        CORS_ORIGINS: List[str] = [o.strip().strip('"').strip("'") for o in _raw_cors.split(",") if o.strip()]
     
     # ============================================================================
     # Logging Configuration
@@ -68,6 +79,8 @@ class Settings(BaseSettings):
     SNAPTRADE_CLIENT_ID: str = os.getenv("SNAPTRADE_CLIENT_ID", "")
     SNAPTRADE_CLIENT_SECRET: str = os.getenv("SNAPTRADE_CLIENT_SECRET", "")
     SNAPTRADE_SANDBOX: bool = os.getenv("SNAPTRADE_SANDBOX", "True").lower() == "true"
+    SNAPTRADE_REDIRECT_URI: str = os.getenv("SNAPTRADE_REDIRECT_URI", "")
+    SNAPTRADE_APP_URL: str = os.getenv("SNAPTRADE_APP_URL", "https://app.snaptrade.com")
     
     # Supported Brokers
     SUPPORTED_CRYPTO_EXCHANGES: List[str] = ["kraken"]  # Kraken only
@@ -213,7 +226,9 @@ class Settings(BaseSettings):
     # ============================================================================
     # Admin Configuration
     # ============================================================================
-    ADMIN_EMAIL: str = "yassinkhanji9@gmail.com"
+    # Owner/Administrator account email (used for owner-gated actions)
+    # Prefer OWNER_EMAIL if provided, else fallback to ADMIN_EMAIL for backward compatibility
+    ADMIN_EMAIL: str = os.getenv("OWNER_EMAIL", os.getenv("ADMIN_EMAIL", "yassinkhanji9@gmail.com"))
     ALLOW_ADMIN_ACCOUNT_SUSPENSION: bool = True
     ALLOW_ADMIN_AUDIT_LOG_ACCESS: bool = True
     

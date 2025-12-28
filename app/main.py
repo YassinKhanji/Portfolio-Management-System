@@ -19,7 +19,7 @@ except Exception as e:
     stop_scheduler = None   # type: ignore
     import warnings
     warnings.warn(f"Scheduler import failed; background jobs disabled: {e}")
-from app.routers import rebalancing_router, system_router, portfolio_router, auth_router
+from app.routers import rebalancing_router, system_router, portfolio_router, auth_router, admin_router
 
 # Setup logging
 logger = setup_logging()
@@ -79,6 +79,7 @@ app.include_router(rebalancing_router)
 app.include_router(system_router)
 app.include_router(portfolio_router)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 # Health check endpoint

@@ -8,6 +8,7 @@ Based on SYSTEM_SPECIFICATIONS.md
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest
+from app.jobs.utils import is_emergency_stop_active
 from app.core.config import get_settings
 import logging
 
@@ -112,6 +113,10 @@ def add_jobs():
 
 def start_scheduler():
     """Start background scheduler"""
+    if is_emergency_stop_active():
+        logger.warning("Scheduler not started because emergency_stop is active")
+        return
+
     if not scheduler.running:
         add_jobs()
         scheduler.start()
@@ -121,5 +126,12 @@ def start_scheduler():
 def stop_scheduler():
     """Stop background scheduler"""
     if scheduler.running:
-        scheduler.shutdown()
+        scheduler.shutdown(wait=False)
         logger.info("[OK] Background scheduler stopped")
+
+
+def stop_jobs_for_emergency(reason: str = ""):
+    """Stop scheduler immediately when an emergency stop is triggered."""
+    if scheduler.running:
+        logger.warning("Stopping scheduler due to emergency stop%s", f": {reason}" if reason else "")
+        scheduler.shutdown(wait=False)

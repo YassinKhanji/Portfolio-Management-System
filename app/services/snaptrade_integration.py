@@ -15,13 +15,21 @@ import logging
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass
+from urllib.parse import urlencode
 import json
+import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
 # SnapTrade API endpoints (replace with your URL)
-SNAPTRADE_API_URL = "https://api.snaptrade.com"
+SNAPTRADE_API_URL = os.getenv("SNAPTRADE_API_URL", "https://api.snaptrade.com").rstrip("/")
 SNAPTRADE_API_KEY = "YOUR_API_KEY"  # Load from environment in production
+SNAPTRADE_CLIENT_ID = os.getenv("SNAPTRADE_CLIENT_ID", "")
+SNAPTRADE_CLIENT_SECRET = os.getenv("SNAPTRADE_CLIENT_SECRET", "")
+SNAPTRADE_REDIRECT_URI = os.getenv("SNAPTRADE_REDIRECT_URI", "")
+SNAPTRADE_SANDBOX = os.getenv("SNAPTRADE_SANDBOX", "True").lower() == "true"
+SNAPTRADE_APP_URL = os.getenv("SNAPTRADE_APP_URL", "https://app.snaptrade.com").rstrip("/")
 
 
 @dataclass
@@ -63,6 +71,158 @@ class TradeOrder:
 class SnapTradeClientError(Exception):
     """SnapTrade API error"""
     pass
+
+
+def _headers() -> Dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "clientId": SNAPTRADE_CLIENT_ID,
+        "consumerKey": SNAPTRADE_CLIENT_SECRET,
+    }
+
+
+def list_accounts(user_id: str, user_secret: str) -> List[Dict]:
+    """List connected accounts for a SnapTrade user."""
+    url = f"{SNAPTRADE_API_URL}/api/v1/accounts"
+    params = {
+        "userId": user_id,
+        "userSecret": user_secret,
+    }
+    try:
+        resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json() if resp.content else []
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SnapTrade list_accounts failed: %s", exc)
+        raise SnapTradeClientError(f"list_accounts failed: {exc}")
+
+
+def get_symbol_quote(ticker: str, account_id: str, user_id: str, user_secret: str) -> Dict:
+    """Fetch quote and universal symbol ID for a ticker on a given account."""
+    url = f"{SNAPTRADE_API_URL}/api/v1/quotes"
+    params = {
+        "symbols": ticker,
+        "accountId": account_id,
+        "userId": user_id,
+        "userSecret": user_secret,
+    }
+    try:
+        resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        # Expecting data structure with items list; pick first match
+        if isinstance(data, dict) and data.get("quotes"):
+            quotes = data["quotes"]
+        else:
+            quotes = data if isinstance(data, list) else []
+        if not quotes:
+            raise SnapTradeClientError("No quotes returned")
+        return quotes[0]
+    except SnapTradeClientError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SnapTrade get_symbol_quote failed: %s", exc)
+        raise SnapTradeClientError(f"quote failed: {exc}")
+
+
+def place_equity_order(
+    *,
+    account_id: str,
+    user_id: str,
+    user_secret: str,
+    universal_symbol_id: str,
+    action: str,
+    order_type: str,
+    time_in_force: str,
+    units: float,
+    limit_price: Optional[float] = None,
+) -> Dict:
+    """Place an order via SnapTrade."""
+    url = f"{SNAPTRADE_API_URL}/api/v1/accounts/{account_id}/orders"
+    params = {
+        "userId": user_id,
+        "userSecret": user_secret,
+    }
+    payload = {
+        "universal_symbol_id": universal_symbol_id,
+        "action": action.upper(),
+        "order_type": order_type.lower(),
+        "time_in_force": time_in_force.upper(),
+        "units": units,
+    }
+    if limit_price is not None:
+        payload["limit_price"] = limit_price
+
+    try:
+        resp = requests.post(url, headers=_headers(), params=params, json=payload, timeout=20)
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SnapTrade place_order failed: %s", exc)
+        raise SnapTradeClientError(f"order failed: {exc}")
+
+
+def provision_snaptrade_user(user_email: str) -> Tuple[str, str]:
+    """Create a SnapTrade user/secret via API (registerUser).
+
+    Returns (user_id, user_secret). Falls back to UUIDs if credentials are missing or the API fails.
+    """
+    if not (SNAPTRADE_CLIENT_ID and SNAPTRADE_CLIENT_SECRET):
+        logger.warning("SnapTrade credentials missing; using UUID fallback for %s", user_email)
+        return str(uuid.uuid4()), str(uuid.uuid4())
+
+    user_id = str(uuid.uuid4())
+    user_secret = str(uuid.uuid4())
+
+    url = f"{SNAPTRADE_API_URL}/api/v1/snapTrade/registerUser"
+    payload = {
+        "userId": user_id,
+        "userSecret": user_secret,
+        "redirectURI": SNAPTRADE_REDIRECT_URI or None,
+        "sandbox": SNAPTRADE_SANDBOX,
+        "metadata": {"email": user_email},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "clientId": SNAPTRADE_CLIENT_ID,
+        "consumerKey": SNAPTRADE_CLIENT_SECRET,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        return data.get("userId", user_id), data.get("userSecret", user_secret)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SnapTrade provisioning failed for %s: %s", user_email, exc)
+        return user_id, user_secret
+
+
+def build_connect_url(
+    *,
+    user_id: str,
+    user_secret: str,
+    broker: str,
+    connection_type: str = "trade",
+) -> str:
+    """Build SnapTrade connection portal URL (trade-only)."""
+
+    params = {
+        "clientId": SNAPTRADE_CLIENT_ID,
+        "userId": user_id,
+        "userSecret": user_secret,
+        "connectionType": connection_type,
+    }
+    if SNAPTRADE_REDIRECT_URI:
+        redirect_with_broker = SNAPTRADE_REDIRECT_URI
+        separator = "&" if "?" in redirect_with_broker else "?"
+        redirect_with_broker = f"{redirect_with_broker}{separator}broker={broker}"
+        params["redirectURI"] = redirect_with_broker
+    if SNAPTRADE_SANDBOX:
+        params["sandbox"] = "true"
+
+    query = urlencode(params)
+    return f"{SNAPTRADE_APP_URL}/login?{query}"
 
 
 class SnapTradeClient:

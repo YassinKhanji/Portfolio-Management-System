@@ -5,6 +5,7 @@ Rebalances all user portfolios based on current regime.
 """
 
 from app.models.database import SessionLocal, User, Position, Alert, Log
+from app.jobs.utils import is_emergency_stop_active
 from app.trading.portfolio_calculator import PortfolioCalculator
 from app.trading.executor import TradeExecutor
 from datetime import datetime
@@ -21,6 +22,10 @@ def rebalance_portfolios():
     error_count = 0
     
     try:
+        if is_emergency_stop_active():
+            logger.warning("Emergency stop active; skipping rebalance run")
+            return
+
         # Get all active users
         active_users = db.query(User).filter(User.is_active == True).all()
         logger.info(f"Rebalancing {len(active_users)} active portfolios...")

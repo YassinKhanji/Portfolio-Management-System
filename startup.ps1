@@ -1,7 +1,7 @@
 # Startup script for Portfolio Management Trading System (Windows)
 # Run: powershell -ExecutionPolicy Bypass -File startup.ps1
 
-Write-Host "rocketstart Portfolio Management Trading System - Startup"
+Write-Host "rocketstart Backend - Startup"
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # Check Python
