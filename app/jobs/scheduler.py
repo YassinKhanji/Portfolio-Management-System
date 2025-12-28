@@ -8,6 +8,7 @@ Based on SYSTEM_SPECIFICATIONS.md
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest
+import asyncio
 from app.jobs.utils import is_emergency_stop_active
 from app.core.config import get_settings
 import logging
@@ -101,8 +102,11 @@ def add_jobs():
     # 5. DAILY EMAIL DIGEST: Daily at 8:00 AM EST
     # Sends portfolio summary + alerts to clients
     # ========================================================================
+    async def _run_daily_digest():
+        await email_digest.send_daily_digest()
+
     scheduler.add_job(
-        email_digest.send_daily_digest,
+        lambda: asyncio.run(_run_daily_digest()),
         CronTrigger(hour=13, minute=0),  # 08:00 EST = 13:00 UTC
         id="daily_email_digest",
         name="Send Daily Email Digest",

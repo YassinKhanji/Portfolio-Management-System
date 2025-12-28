@@ -4,6 +4,7 @@ from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 from app.main import app
@@ -14,7 +15,11 @@ from app.services.snaptrade_integration import SnapTradeClientError
 
 @pytest.fixture
 def test_app(monkeypatch):
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
 
@@ -175,4 +180,3 @@ def test_admin_connections_requires_admin(monkeypatch, test_app):
 
     resp = client.get("/api/auth/snaptrade/connections")
     assert resp.status_code == 403
-*** End File

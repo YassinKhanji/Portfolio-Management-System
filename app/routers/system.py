@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 import logging
 from datetime import datetime
 
+from sqlalchemy import func, text
+
 from ..models.database import SessionLocal, User, Connection, Position, Log, SystemStatus as SystemStatusModel
 from ..jobs.scheduler import start_scheduler, stop_jobs_for_emergency
 
@@ -124,48 +126,97 @@ async def get_system_health(db: Session = Depends(get_db)):
     """
     try:
         logger.info("System health check requested")
-        
-        # Check database connection
-        database_connected = True
+        now = datetime.utcnow()
+
+        # Defaults
+        database_connected = False
+        total_users = 0
+        active_users = 0
+        total_aum = 0.0
+        market_data_age_minutes = None
+        benchmark_data_age_minutes = None
+        regime_engine_running = False  # Still stubbed
+
+        # Attempt lightweight DB ping first; skip further queries if it fails
         try:
-            user_count = db.query(User).count()
+            db.execute(text("SELECT 1"))
+            database_connected = True
         except Exception as db_error:
             logger.error(f"Database connection failed: {str(db_error)}")
-            database_connected = False
-            user_count = 0
-        
-        # Regime engine not wired yet (crypto-only detector stubbed)
-        regime_engine_running = False
-        
-        # Active users (no last_login tracking yet)
-        active_users = user_count
 
-        # Total AUM placeholder (not yet calculated)
-        total_aum = None
+        if database_connected:
+            try:
+                total_users = db.query(User).count()
+                active_users = db.query(User).filter(User.last_login.isnot(None)).count()
+                total_aum = db.query(func.coalesce(func.sum(Position.market_value), 0)).scalar() or 0.0
+            except Exception as query_error:
+                logger.warning(f"Health metrics query failed: {query_error}")
+                database_connected = False
 
-        # Pull current emergency stop state
-        system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
-        emergency_stop = bool(system_status and system_status.emergency_stop_active)
-        market_data_age_minutes = None
+        system_status = None
+        emergency_stop = False
+        last_market_refresh = None
+        last_benchmark_refresh = None
+        benchmark_data_available = False
+        try:
+            if database_connected:
+                system_status = db.query(SystemStatusModel).filter(SystemStatusModel.id == "system").first()
+                if system_status:
+                    emergency_stop = bool(system_status.emergency_stop_active)
+                    last_market_refresh = system_status.last_market_data_refresh
+                    last_benchmark_refresh = system_status.last_benchmark_refresh
+                    benchmark_data_available = bool(system_status.benchmark_data_available)
+                else:
+                    system_status = SystemStatusModel(id="system")
+        except Exception as status_error:
+            logger.warning(f"Failed to load system status record: {status_error}")
+
+        if last_market_refresh:
+            market_data_age_minutes = int((now - last_market_refresh).total_seconds() / 60)
+
+        if last_benchmark_refresh:
+            benchmark_data_age_minutes = int((now - last_benchmark_refresh).total_seconds() / 60)
 
         status = "healthy" if database_connected else "critical"
-        
+        if market_data_age_minutes is not None and market_data_age_minutes >= 240:
+            status = "degraded"
+        if benchmark_data_age_minutes is not None and benchmark_data_age_minutes >= 240:
+            status = "degraded"
+
+        # Persist the latest metrics when the DB is reachable
+        try:
+            if database_connected and system_status:
+                system_status.database_connection = database_connected
+                system_status.last_health_check = now
+                system_status.last_market_data_refresh = last_market_refresh
+                system_status.last_benchmark_refresh = last_benchmark_refresh
+                system_status.total_users = total_users
+                system_status.active_users = active_users
+                system_status.total_aum = total_aum
+                system_status.benchmark_data_available = benchmark_data_available
+                db.add(system_status)
+                db.commit()
+        except Exception as persist_error:
+            logger.warning(f"Failed to persist system health snapshot: {persist_error}")
+
         health_data = {
             "status": status,
             "regime_engine": regime_engine_running,
             "database_connection": database_connected,
             "market_data_age_minutes": market_data_age_minutes,
-            "total_users": user_count,
+            "benchmark_data_age_minutes": benchmark_data_age_minutes,
+            "benchmark_data_available": benchmark_data_available,
+            "total_users": total_users,
             "active_users": active_users,
             "total_aum": total_aum,
             "emergency_stop": emergency_stop,
             "last_rebalance": None,  # TODO: Track last rebalance time
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": now.isoformat() + "Z"
         }
-        
+
         logger.info(f"System health: {status}")
         return health_data
-        
+
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}", exc_info=True)
         # Return degraded status on error

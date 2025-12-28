@@ -20,24 +20,18 @@ def check_system_health():
         # Get current timestamp
         now = datetime.utcnow()
         
-        # Check database connectivity by querying SystemStatus
-        status_count = db.query(SystemStatus).count()
-        
-        # Create/update system status
-        latest_status = db.query(SystemStatus).order_by(
-            SystemStatus.last_check.desc()
-        ).first()
-        
-        # Create new status entry
-        status = SystemStatus(
-            component="api",
-            status="healthy",
-            last_check=now,
-            cpu_usage=None,  # Would fetch real CPU usage here
-            memory_usage=None,
-            response_time_ms=0
-        )
-        db.add(status)
+        # Create/update system status (single row keyed by id="system")
+        status = db.query(SystemStatus).filter(SystemStatus.id == "system").first()
+        if not status:
+            status = SystemStatus(id="system")
+            db.add(status)
+
+        status.database_connection = True
+        status.snaptrade_api_available = True
+        status.market_data_available = True
+        status.benchmark_data_available = getattr(status, "benchmark_data_available", False)
+        status.last_health_check = now
+        status.updated_at = now
         
         # Log successful health check
         log = Log(

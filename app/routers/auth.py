@@ -656,6 +656,17 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
 
         # First-login provisioning for per-broker SnapTrade identifiers
         ensure_snaptrade_connections(user, db)
+
+        # Mark first/last login and activate account on first successful login
+        now = datetime.utcnow()
+        if not user.first_login_at:
+            user.first_login_at = now
+            user.active = True
+        user.last_login = now
+        user.updated_at = now
+        db.add(user)
+        db.commit()
+        db.refresh(user)
         
         # Create access token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

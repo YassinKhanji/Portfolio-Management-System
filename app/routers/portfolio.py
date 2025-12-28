@@ -23,6 +23,7 @@ from ..models.database import (
     Connection,
     PortfolioSnapshot,
     RiskProfile,
+    SystemStatus,
 )
 from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
@@ -51,6 +52,11 @@ _benchmark_cache: Dict[str, object] = {
     "data": [],  # list of {date: datetime.date, close: float}
 }
 
+_benchmark_intraday_cache: Dict[str, object] = {
+    "fetched_at": None,
+    "data": [],  # list of {timestamp: datetime, close: float}
+}
+
 
 def _fetch_sp500_history() -> List[dict]:
     """Fetch last 5y of SP500 (\^GSPC) daily closes, cached for reuse."""
@@ -71,6 +77,23 @@ def _fetch_sp500_history() -> List[dict]:
         return []
 
 
+def _fetch_sp500_intraday(days: int = 7) -> List[dict]:
+    """Fetch intraday S&P 500 (hourly) closes for the last N days."""
+    try:
+        df = yf.download("^GSPC", period=f"{days}d", interval="60m", progress=False)
+        if df is None or df.empty:
+            logger.warning("yfinance returned empty intraday data for ^GSPC")
+            return []
+        records = []
+        for idx, row in df.iterrows():
+            ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
+            records.append({"timestamp": ts, "close": float(row.get("Close"))})
+        return records
+    except Exception as exc:  # pragma: no cover - network dependency
+        logger.error(f"Failed to fetch intraday ^GSPC from yfinance: {exc}")
+        return []
+
+
 def _get_sp500_history() -> List[dict]:
     """Return cached SP500 history or refresh if stale (>6h) or empty."""
     fetched_at = _benchmark_cache.get("fetched_at")
@@ -86,6 +109,24 @@ def _get_sp500_history() -> List[dict]:
         if data:
             _benchmark_cache["fetched_at"] = datetime.utcnow()
             _benchmark_cache["data"] = data
+    return data
+
+
+def _get_sp500_intraday() -> List[dict]:
+    """Return cached intraday SP500 history (hourly) or refresh if stale (>1h)."""
+    fetched_at = _benchmark_intraday_cache.get("fetched_at")
+    data = _benchmark_intraday_cache.get("data") or []
+
+    stale = True
+    if fetched_at:
+        age_hours = (datetime.utcnow() - fetched_at).total_seconds() / 3600
+        stale = age_hours > 1
+
+    if stale or not data:
+        data = _fetch_sp500_intraday()
+        if data:
+            _benchmark_intraday_cache["fetched_at"] = datetime.utcnow()
+            _benchmark_intraday_cache["data"] = data
     return data
 
 
@@ -461,12 +502,18 @@ async def delete_client(user_id: str, db: Session = Depends(get_db)):
         if not user:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        # Clean up related records (best-effort)
+        # Clean up related records (best-effort), including SnapTrade access
         db.query(Position).filter(Position.user_id == user_id).delete()
         db.query(Transaction).filter(Transaction.user_id == user_id).delete()
         db.query(Connection).filter(Connection.user_id == user_id).delete()
         db.query(PortfolioSnapshot).filter(PortfolioSnapshot.user_id == user_id).delete()
         db.query(RiskProfile).filter(RiskProfile.user_id == user_id).delete()
+
+        # Wipe SnapTrade identifiers on the user before deletion to avoid retaining secrets
+        user.snaptrade_user_id = None
+        user.snaptrade_token = None
+        user.snaptrade_linked = False
+        db.add(user)
 
         db.delete(user)
         db.commit()
@@ -670,6 +717,7 @@ async def get_portfolio_performance(
     user_id: Optional[str] = None,
     risk_profile: Optional[str] = None,
     period: str = "1M",
+    resolution: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -682,13 +730,17 @@ async def get_portfolio_performance(
     try:
         logger.info(f"Fetching performance data (period={period}, user_id={user_id}, risk_profile={risk_profile})...")
 
-        # Determine lookback window
+        # Determine lookback window and resolution (auto: hourly for 1D/7D)
         now = datetime.utcnow()
         upper = period.upper()
+        desired_resolution = (resolution or "auto").lower()
+        use_hourly = desired_resolution == "hourly" or (desired_resolution == "auto" and upper in {"1D", "7D"})
+
         if upper == "YTD":
             start_date = datetime(now.year, 1, 1)
         else:
             days_map = {
+                "1D": 1,
                 "7D": 7,
                 "1M": 30,
                 "3M": 90,
@@ -721,33 +773,46 @@ async def get_portfolio_performance(
         if not snapshots:
             return {"period": period, "data": [], "total_return": 0, "benchmark_return": None}
 
-        # Aggregate by day; skip data before a user's creation date
-        by_day: dict = {}
+        # Aggregate by bucket (hourly or daily); skip data before a user's creation date
+        buckets: dict = {}
         for snap in snapshots:
             created_at = created_map.get(snap.user_id, snap.recorded_at)
             if snap.recorded_at < created_at:
                 continue
-            day = snap.recorded_at.date()
-            by_day[day] = by_day.get(day, 0.0) + float(snap.total_value or 0.0)
+            if use_hourly:
+                key_dt = snap.recorded_at.replace(minute=0, second=0, microsecond=0)
+            else:
+                key_dt = datetime.combine(snap.recorded_at.date(), datetime.min.time())
+            buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
 
-        if not by_day:
-            return {"period": period, "data": [], "total_return": 0, "benchmark_return": None}
+        if not buckets:
+            return {"period": period, "data": [], "total_return": 0, "benchmark_return": None, "benchmark_available": False, "resolution": "hourly" if use_hourly else "daily"}
 
-        benchmark_series = _get_sp500_history()
-        benchmark_map = {row["date"]: row["close"] for row in benchmark_series}
+        # Determine if benchmark should be shown (only when market data is available)
+        system_status = db.query(SystemStatus).filter(SystemStatus.id == "system").first()
+        allow_benchmark = bool(system_status and system_status.market_data_available)
 
-        sorted_days = sorted(by_day.keys())
+        if use_hourly:
+            benchmark_series = _get_sp500_intraday()
+            benchmark_map = {row["timestamp"].replace(minute=0, second=0, microsecond=0): row["close"] for row in benchmark_series}
+        else:
+            benchmark_series = _get_sp500_history()
+            benchmark_map = {row["date"]: row["close"] for row in benchmark_series}
+
+        sorted_keys = sorted(buckets.keys())
         data = []
         last_bench = None
-        for day in sorted_days:
-            bench_val = benchmark_map.get(day, last_bench)
-            if bench_val is not None:
-                last_bench = bench_val
+        for key_dt in sorted_keys:
+            bench_val = None
+            if allow_benchmark:
+                lookup_key = key_dt if use_hourly else key_dt.date()
+                bench_val = benchmark_map.get(lookup_key, last_bench)
+                if bench_val is not None:
+                    last_bench = bench_val
 
-            dt = datetime.combine(day, datetime.min.time())
             data.append({
-                "date": dt.isoformat() + "Z",
-                "value": round(by_day[day], 2),
+                "date": key_dt.isoformat() + "Z",
+                "value": round(buckets[key_dt], 2),
                 "benchmark": bench_val,
             })
 
@@ -758,7 +823,7 @@ async def get_portfolio_performance(
         first_bench = data[0].get("benchmark") if data else None
         last_bench = data[-1].get("benchmark") if data else None
         benchmark_return = None
-        if first_bench and last_bench:
+        if allow_benchmark and first_bench and last_bench:
             benchmark_return = ((last_bench - first_bench) / first_bench * 100)
 
         return {
@@ -766,6 +831,8 @@ async def get_portfolio_performance(
             "data": data,
             "total_return": round(total_return, 2),
             "benchmark_return": round(benchmark_return, 2) if benchmark_return is not None else None,
+            "benchmark_available": allow_benchmark and any(point.get("benchmark") is not None for point in data),
+            "resolution": "hourly" if use_hourly else "daily",
         }
 
     except Exception as e:
@@ -1077,20 +1144,26 @@ async def update_risk_profile(
                 detail=f"Invalid risk profile. Must be one of: {', '.join(valid_profiles)}"
             )
         
+        # Re-attach user to this DB session to avoid "not persistent" errors
+        user = db.query(User).filter(User.id == current_user.id).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
         # Update user's risk profile
-        current_user.risk_profile = request.risk_profile
-        current_user.updated_at = datetime.utcnow()
+        user.risk_profile = request.risk_profile
+        user.updated_at = datetime.utcnow()
+        db.add(user)
         db.commit()
-        db.refresh(current_user)
+        db.refresh(user)
         
-        logger.info(f"Updated risk profile for user {current_user.email}: {request.risk_profile}")
+        logger.info(f"Updated risk profile for user {user.email}: {request.risk_profile}")
         
         return {
-            "id": current_user.id,
-            "email": current_user.email,
-            "full_name": current_user.full_name,
-            "risk_profile": current_user.risk_profile,
-            "updated_at": current_user.updated_at.isoformat() if current_user.updated_at else None
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "risk_profile": user.risk_profile,
+            "updated_at": user.updated_at.isoformat() if user.updated_at else None
         }
         
     except HTTPException:

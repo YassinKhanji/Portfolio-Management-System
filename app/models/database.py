@@ -60,7 +60,9 @@ class User(Base):
     
     # User role and status
     role = Column(String, default="client")  # 'admin' or 'client'
-    active = Column(Boolean, default=True)  # For admin to suspend accounts (named 'active' in DB)
+    active = Column(Boolean, default=False)  # Activated after first successful login
+    first_login_at = Column(DateTime, nullable=True)
+    last_login = Column(DateTime, nullable=True)
     
     # SnapTrade integration
     snaptrade_token = Column(String, nullable=True)
@@ -262,7 +264,7 @@ class Alert(Base):
     """System and user alerts - 30 day retention for unread alerts"""
     __tablename__ = "alerts"
     
-    id = Column(String, primary_key=True)  # UUID
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))  # UUID
     
     # Alert classification
     alert_type = Column(String, nullable=False, index=True)  # rebalance_completed, regime_change, etc.
@@ -323,9 +325,11 @@ class SystemStatus(Base):
     database_connection = Column(Boolean, default=True)
     snaptrade_api_available = Column(Boolean, default=True)
     market_data_available = Column(Boolean, default=True)
+    benchmark_data_available = Column(Boolean, default=False)
     
     # Last update timestamps
     last_market_data_refresh = Column(DateTime, nullable=True)
+    last_benchmark_refresh = Column(DateTime, nullable=True)
     last_health_check = Column(DateTime, nullable=True)
     last_rebalance = Column(DateTime, nullable=True)
     
