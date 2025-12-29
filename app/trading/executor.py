@@ -1,35 +1,59 @@
-"""
-Trade Executor Module
+"""Trade Executor Module
 
-Execute trades via SnapTrade API.
+Execute trades via SnapTrade API using per-connection credentials and account types.
 """
 
+import logging
+from typing import Dict, List, Optional
+
+from sqlalchemy.orm import Session
+
+from app.models.database import Connection
 from app.services.snaptrade_integration import SnapTradeClient, SnapTradeClientError
 from app.jobs.utils import is_emergency_stop_active
-import logging
-from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
 
 class TradeExecutor:
-    """Execute trades via SnapTrade"""
+    """Execute trades via SnapTrade with per-account-type routing."""
     
-    def __init__(self, user_snaptrade_token: str):
-        """Initialize executor with user's SnapTrade token"""
-        self.client = SnapTradeClient(user_token=user_snaptrade_token)
+    def __init__(self, connections: List[Connection]):
+        """Initialize executor with all available SnapTrade connections for a user."""
+        self.connections = {c.account_type.lower(): c for c in connections}
+        self.clients: Dict[str, SnapTradeClient] = {}
+        for acct_type, conn in self.connections.items():
+            self.clients[acct_type] = SnapTradeClient(
+                user_id=conn.snaptrade_user_id,
+                user_secret=conn.snaptrade_user_secret,
+            )
+
+    def _pick_connection(self, trade_info: Dict) -> Connection:
+        """Select connection based on trade metadata (account_type/asset_class)."""
+        acct_type = str(trade_info.get("account_type") or trade_info.get("asset_class") or "").lower()
+        if acct_type in {"crypto", "cryptocurrency"}:
+            key = "crypto"
+        elif acct_type in {"equities", "equity", "stock", "stocks"}:
+            key = "equities"
+        else:
+            key = "equities"  # default route
+
+        conn = self.connections.get(key)
+        if not conn:
+            raise SnapTradeClientError(f"No SnapTrade connection configured for account_type='{key}'")
+        if not conn.account_id:
+            raise SnapTradeClientError(f"SnapTrade connection '{key}' is missing account_id")
+        return conn
     
     def execute_trades(
         self,
-        account_id: str,
-        trades: Dict
+        trades: Dict,
     ) -> List[Dict]:
         """
         Execute all required trades
         
         Args:
-            account_id: SnapTrade account ID
-            trades: Dict of trades to execute {symbol: {action, quantity, ...}}
+            trades: Dict of trades to execute {symbol: {action, quantity, account_type?, ...}}
         
         Returns:
             List of executed trades with results
@@ -41,17 +65,21 @@ class TradeExecutor:
                 logger.error("Emergency stop active; aborting trade execution")
                 raise RuntimeError("Trading halted: emergency_stop is active")
 
-            logger.info(f"Executing {len(trades)} trades for account {account_id}...")
+            logger.info(f"Executing {len(trades)} trades with account-type routing...")
             
             for symbol, trade_info in trades.items():
                 try:
+                    conn = self._pick_connection(trade_info)
+                    client = self.clients[conn.account_type.lower()]
+                    account_id = conn.account_id
+
                     action = trade_info['action']
                     quantity = trade_info['quantity']
                     
                     if action == "BUY":
-                        result = self.client.buy(account_id, symbol, quantity)
+                        result = client.buy(account_id, symbol, quantity)
                     elif action == "SELL":
-                        result = self.client.sell(account_id, symbol, quantity)
+                        result = client.sell(account_id, symbol, quantity)
                     else:
                         logger.warning(f"Unknown action: {action}")
                         continue

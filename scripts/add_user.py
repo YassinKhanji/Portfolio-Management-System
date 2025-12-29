@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import create_engine, Column, String, DateTime, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from passlib.context import CryptContext
 
@@ -55,8 +55,8 @@ class User(Base):
     risk_profile = Column(String, default="Balanced")
     rebalance_frequency = Column(String, default="daily")
     active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     metadata_json = Column(JSON, default={})
 
 def add_user(email: str, password: str, full_name: str, role: str = "client", risk_profile: str = "Balanced"):
@@ -94,8 +94,8 @@ def add_user(email: str, password: str, full_name: str, role: str = "client", ri
             role=role,
             active=True,
             risk_profile=risk_profile,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
         )
         
         db.add(new_user)

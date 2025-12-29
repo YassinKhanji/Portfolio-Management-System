@@ -16,7 +16,7 @@ Behavior:
 import os
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, DateTime, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -66,7 +66,7 @@ def ensure_owner(email: str, password: str) -> None:
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.email == email).first()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         if user:
             user.role = "owner"

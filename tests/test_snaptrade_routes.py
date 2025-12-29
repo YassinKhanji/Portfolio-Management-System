@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,8 +31,8 @@ def test_app(monkeypatch):
         full_name="Snap Trader",
         role="admin",
         active=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(user)
     db.commit()
@@ -49,15 +49,15 @@ def test_app(monkeypatch):
     def override_current_user():
         session = TestingSessionLocal()
         try:
-            return session.query(User).get(user.id)
+            return session.get(User, user.id)
         finally:
             session.close()
 
     app.dependency_overrides[auth_router.get_db] = override_get_db
     app.dependency_overrides[auth_router.get_current_user] = override_current_user
 
-    # Ensure deterministic SnapTrade identity provisioning
-    monkeypatch.setattr(auth_router, "provision_snaptrade_user", lambda email: ("user-id", "user-secret"))
+    # Ensure deterministic SnapTrade identity registering
+    monkeypatch.setattr(auth_router, "register_snaptrade_user", lambda email: ("user-id", "user-secret"))
 
     client = TestClient(app)
     try:
@@ -98,8 +98,8 @@ def test_symbol_lookup_returns_universal_id(monkeypatch, test_app):
         is_connected=True,
         connection_status="connected",
         account_id="acct-abc",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     session.add(conn)
     session.commit()
@@ -132,8 +132,8 @@ def test_order_endpoint_fallbacks_to_ioc(monkeypatch, test_app):
         is_connected=True,
         connection_status="connected",
         account_id="acct-abc",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     session.add(conn)
     session.commit()
@@ -173,7 +173,7 @@ def test_admin_connections_requires_admin(monkeypatch, test_app):
 
     # Set user to client and ensure forbidden
     session = SessionLocal()
-    user_record = session.query(User).get(user.id)
+    user_record = session.get(User, user.id)
     user_record.role = "client"
     session.commit()
     session.close()

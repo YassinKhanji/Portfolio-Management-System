@@ -5,7 +5,7 @@ Helper functions for creating and managing alerts.
 """
 
 from app.models.database import SessionLocal, Alert
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import logging
 
@@ -49,7 +49,7 @@ def create_alert(
             message=message,
             user_id=user_id,
             action_required=action_required,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         db.add(alert)
         db.commit()

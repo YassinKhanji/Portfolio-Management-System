@@ -99,20 +99,20 @@ def add_jobs():
     logger.info("[OK] Added job: health_check (every hour)")
     
     # ========================================================================
-    # 5. DAILY EMAIL DIGEST: Daily at 8:00 AM EST
+    # 5. WEEKLY EMAIL DIGEST: Saturday at 12:00 PM EST
     # Sends portfolio summary + alerts to clients
     # ========================================================================
-    async def _run_daily_digest():
-        await email_digest.send_daily_digest()
+    async def _run_weekly_digest():
+        await email_digest.send_weekly_digest()
 
     scheduler.add_job(
-        lambda: asyncio.run(_run_daily_digest()),
-        CronTrigger(hour=13, minute=0),  # 08:00 EST = 13:00 UTC
-        id="daily_email_digest",
-        name="Send Daily Email Digest",
+        lambda: asyncio.run(_run_weekly_digest()),
+        CronTrigger(day_of_week="sat", hour=17, minute=0),  # 12:00 PM EST = 17:00 UTC
+        id="weekly_email_digest",
+        name="Send Weekly Email Digest",
         replace_existing=True
     )
-    logger.info("[OK] Added job: daily_email_digest (08:00 EST daily)")
+    logger.info("[OK] Added job: weekly_email_digest (Saturday 12:00 PM EST)")
 
 
 def start_scheduler():

@@ -4,11 +4,11 @@ Daily Rebalance Job
 Rebalances all user portfolios based on current regime.
 """
 
-from app.models.database import SessionLocal, User, Position, Alert, Log
+from app.models.database import SessionLocal, User, Position, Alert, Log, Connection
 from app.jobs.utils import is_emergency_stop_active
 from app.trading.portfolio_calculator import PortfolioCalculator
 from app.trading.executor import TradeExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -52,9 +52,22 @@ def rebalance_portfolios():
                 )
                 
                 if required_trades:
-                    # Execute trades
-                    executor = TradeExecutor(user.snaptrade_user_token)
-                    executor.execute_trades(required_trades, user.id)
+                    # Load all connected SnapTrade accounts for routing by account_type
+                    connections = (
+                        db.query(Connection)
+                        .filter(
+                            Connection.user_id == user.id,
+                            Connection.is_connected == True,
+                        )
+                        .all()
+                    )
+
+                    if not connections:
+                        logger.warning(f"No connected SnapTrade accounts for user {user.id}; skipping trades")
+                        continue
+
+                    executor = TradeExecutor(connections)
+                    executor.execute_trades(required_trades)
                     
                     rebalanced_count += 1
                     logger.info(f"[OK] Rebalanced portfolio for user {user.id}")
@@ -75,7 +88,7 @@ def rebalance_portfolios():
         
         # Log the job result
         log = Log(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             level="info",
             message=f"Daily rebalance completed: {rebalanced_count} successful, {error_count} failed",
             component="daily_rebalance_job",
@@ -95,7 +108,7 @@ def rebalance_portfolios():
         # Log the critical error
         try:
             log = Log(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 level="critical",
                 message=f"Rebalance job failed: {str(e)}",
                 component="daily_rebalance_job"

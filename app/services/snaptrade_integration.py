@@ -1,35 +1,34 @@
 """
-SnapTrade Integration Layer
+SnapTrade Integration Layer (Updated for SDK 11.x)
 
-Abstraction over SnapTrade API for:
+Abstraction over SnapTrade Python SDK for:
 - Account and holdings management
 - Order execution
 - Performance tracking
-- OAuth flow
+- Connection flow
 
-SnapTrade handles Canadian investment accounts with multi-broker support.
+SnapTrade handles investment accounts with multi-broker support.
+Uses the official snaptrade-python-sdk package.
 """
 
-import requests
 import logging
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime
-from dataclasses import dataclass
-from urllib.parse import urlencode
-import json
 import os
 import uuid
+from typing import List, Dict, Optional
+from datetime import datetime
+from dataclasses import dataclass
+
+from snaptrade_client import SnapTrade
+
+from ..core.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
-# SnapTrade API endpoints (replace with your URL)
-SNAPTRADE_API_URL = os.getenv("SNAPTRADE_API_URL", "https://api.snaptrade.com").rstrip("/")
-SNAPTRADE_API_KEY = "YOUR_API_KEY"  # Load from environment in production
-SNAPTRADE_CLIENT_ID = os.getenv("SNAPTRADE_CLIENT_ID", "")
-SNAPTRADE_CLIENT_SECRET = os.getenv("SNAPTRADE_CLIENT_SECRET", "")
-SNAPTRADE_REDIRECT_URI = os.getenv("SNAPTRADE_REDIRECT_URI", "")
-SNAPTRADE_SANDBOX = os.getenv("SNAPTRADE_SANDBOX", "True").lower() == "true"
-SNAPTRADE_APP_URL = os.getenv("SNAPTRADE_APP_URL", "https://app.snaptrade.com").rstrip("/")
+
+class SnapTradeClientError(Exception):
+    """SnapTrade API error"""
+    pass
 
 
 @dataclass
@@ -68,183 +67,158 @@ class TradeOrder:
     timestamp: datetime
 
 
-class SnapTradeClientError(Exception):
-    """SnapTrade API error"""
-    pass
+def get_snaptrade_client() -> SnapTrade:
+    """Initialize and return a SnapTrade client with credentials from settings."""
+    if not settings.SNAPTRADE_CLIENT_ID or not settings.SNAPTRADE_CLIENT_SECRET:
+        raise SnapTradeClientError(
+            "SnapTrade credentials missing; set SNAPTRADE_CLIENT_ID and SNAPTRADE_CLIENT_SECRET"
+        )
+    
+    return SnapTrade(
+        consumer_key=settings.SNAPTRADE_CLIENT_SECRET,
+        client_id=settings.SNAPTRADE_CLIENT_ID
+    )
 
 
-def _headers() -> Dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "clientId": SNAPTRADE_CLIENT_ID,
-        "consumerKey": SNAPTRADE_CLIENT_SECRET,
-    }
+def register_snaptrade_user(user_id: str) -> Dict[str, str]:
+    """
+    Register a new SnapTrade user.
 
+    If the ID already exists on SnapTrade (code 1010), retry once with a
+    suffixed UUID to avoid collisions while still persisting the credentials we get.
+    """
 
-def list_accounts(user_id: str, user_secret: str) -> List[Dict]:
-    """List connected accounts for a SnapTrade user."""
-    url = f"{SNAPTRADE_API_URL}/api/v1/accounts"
-    params = {
-        "userId": user_id,
-        "userSecret": user_secret,
-    }
+    def _attempt(uid: str) -> Dict[str, str]:
+        snaptrade = get_snaptrade_client()
+        response = snaptrade.authentication.register_snap_trade_user(user_id=uid)
+        return {
+            "userId": response.body.get("userId"),
+            "userSecret": response.body.get("userSecret"),
+        }
+
     try:
-        resp = requests.get(url, headers=_headers(), params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json() if resp.content else []
-    except Exception as exc:  # noqa: BLE001
-        logger.error("SnapTrade list_accounts failed: %s", exc)
-        raise SnapTradeClientError(f"list_accounts failed: {exc}")
+        return _attempt(user_id)
+    except Exception as e:
+        msg = str(e) if e else ""
+        # SnapTrade 1010: user already exists
+        if "already exist" in msg or "1010" in msg:
+            fallback_id = f"{user_id}-{uuid.uuid4().hex[:8]}"
+            try:
+                logger.warning("SnapTrade userId %s exists; retrying with %s", user_id, fallback_id)
+                return _attempt(fallback_id)
+            except Exception as e2:
+                logger.error("Fallback SnapTrade registration failed for %s: %s", fallback_id, e2)
+                raise SnapTradeClientError(f"User registration failed after fallback: {e2}")
+        logger.error(f"Failed to register SnapTrade user {user_id}: {e}")
+        raise SnapTradeClientError(f"User registration failed: {e}")
 
 
-def get_symbol_quote(ticker: str, account_id: str, user_id: str, user_secret: str) -> Dict:
-    """Fetch quote and universal symbol ID for a ticker on a given account."""
-    url = f"{SNAPTRADE_API_URL}/api/v1/quotes"
-    params = {
-        "symbols": ticker,
-        "accountId": account_id,
-        "userId": user_id,
-        "userSecret": user_secret,
-    }
-    try:
-        resp = requests.get(url, headers=_headers(), params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json() if resp.content else {}
-        # Expecting data structure with items list; pick first match
-        if isinstance(data, dict) and data.get("quotes"):
-            quotes = data["quotes"]
-        else:
-            quotes = data if isinstance(data, list) else []
-        if not quotes:
-            raise SnapTradeClientError("No quotes returned")
-        return quotes[0]
-    except SnapTradeClientError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("SnapTrade get_symbol_quote failed: %s", exc)
-        raise SnapTradeClientError(f"quote failed: {exc}")
-
-
-def place_equity_order(
-    *,
-    account_id: str,
+def generate_connection_url(
     user_id: str,
     user_secret: str,
-    universal_symbol_id: str,
-    action: str,
-    order_type: str,
-    time_in_force: str,
-    units: float,
-    limit_price: Optional[float] = None,
-) -> Dict:
-    """Place an order via SnapTrade."""
-    url = f"{SNAPTRADE_API_URL}/api/v1/accounts/{account_id}/orders"
-    params = {
-        "userId": user_id,
-        "userSecret": user_secret,
-    }
-    payload = {
-        "universal_symbol_id": universal_symbol_id,
-        "action": action.upper(),
-        "order_type": order_type.lower(),
-        "time_in_force": time_in_force.upper(),
-        "units": units,
-    }
-    if limit_price is not None:
-        payload["limit_price"] = limit_price
-
-    try:
-        resp = requests.post(url, headers=_headers(), params=params, json=payload, timeout=20)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
-    except Exception as exc:  # noqa: BLE001
-        logger.error("SnapTrade place_order failed: %s", exc)
-        raise SnapTradeClientError(f"order failed: {exc}")
-
-
-def provision_snaptrade_user(user_email: str) -> Tuple[str, str]:
-    """Create a SnapTrade user/secret via API (registerUser).
-
-    Returns (user_id, user_secret). Falls back to UUIDs if credentials are missing or the API fails.
+    broker: Optional[str] = None,
+    immediate_redirect: bool = True,
+    custom_redirect: Optional[str] = None,
+    reconnect: Optional[str] = None,
+    connection_type: str = "trade",
+) -> str:
     """
-    if not (SNAPTRADE_CLIENT_ID and SNAPTRADE_CLIENT_SECRET):
-        logger.warning("SnapTrade credentials missing; using UUID fallback for %s", user_email)
-        return str(uuid.uuid4()), str(uuid.uuid4())
-
-    user_id = str(uuid.uuid4())
-    user_secret = str(uuid.uuid4())
-
-    url = f"{SNAPTRADE_API_URL}/api/v1/snapTrade/registerUser"
-    payload = {
-        "userId": user_id,
-        "userSecret": user_secret,
-        "redirectURI": SNAPTRADE_REDIRECT_URI or None,
-        "sandbox": SNAPTRADE_SANDBOX,
-        "metadata": {"email": user_email},
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "clientId": SNAPTRADE_CLIENT_ID,
-        "consumerKey": SNAPTRADE_CLIENT_SECRET,
-    }
-
+    Generate a connection portal URL for a user to connect their brokerage account.
+    
+    Args:
+        user_id: SnapTrade user ID
+        user_secret: SnapTrade user secret
+        broker: Optional broker slug to pre-select (e.g., "QUESTRADE", "WEALTHSIMPLE", "ALPACA")
+        immediate_redirect: Whether to bypass broker selection screen if possible
+        custom_redirect: Custom redirect URI after connection
+        reconnect: Brokerage authorization ID to reconnect
+        connection_type: Type of connection ("read", "trade", or "trade-if-available")
+        show_close_button: Controls whether the close (X) button is displayed
+        dark_mode: Enable dark mode for the connection portal
+        connection_portal_version: Portal version (default "v4")
+    
+    Returns:
+        URL string for the connection portal
+    """
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json() if resp.content else {}
-        return data.get("userId", user_id), data.get("userSecret", user_secret)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("SnapTrade provisioning failed for %s: %s", user_email, exc)
-        return user_id, user_secret
+        snaptrade = get_snaptrade_client()
+        
+        # Build kwargs, only include non-None values
+        kwargs = {
+            "user_id": user_id,
+            "user_secret": user_secret,
+        }
+        
+        if broker is not None:
+            kwargs["broker"] = broker
+        if immediate_redirect is not None:
+            kwargs["immediate_redirect"] = immediate_redirect
+        if custom_redirect is not None:
+            kwargs["custom_redirect"] = custom_redirect
+        elif settings.SNAPTRADE_REDIRECT_URI:
+            kwargs["custom_redirect"] = settings.SNAPTRADE_REDIRECT_URI
+        if reconnect is not None:
+            kwargs["reconnect"] = reconnect
+        if connection_type is not None:
+            kwargs["connection_type"] = connection_type
+        
+        response = snaptrade.authentication.login_snap_trade_user(**kwargs)
+        
+        redirect_uri = response.body.get("redirectURI")
+        if not redirect_uri:
+            raise SnapTradeClientError("No redirectURI returned from API")
+        
+        logger.info(f"Generated connection URL for user: {user_id}")
+        return redirect_uri
+        
+    except Exception as e:
+        logger.error(f"Failed to generate connection URL: {e}")
+        raise SnapTradeClientError(f"Connection URL generation failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers expected by router layer
+# ---------------------------------------------------------------------------
+
+def provision_snaptrade_user(user_email: str) -> tuple[str, str]:
+    """Provision a SnapTrade user using the email as stable identifier."""
+    result = register_snaptrade_user(user_email)
+    return result["userId"], result["userSecret"]
 
 
 def build_connect_url(
-    *,
     user_id: str,
     user_secret: str,
-    broker: str,
+    broker: str | None = None,
     connection_type: str = "trade",
 ) -> str:
-    """Build SnapTrade connection portal URL (trade-only)."""
-
-    params = {
-        "clientId": SNAPTRADE_CLIENT_ID,
-        "userId": user_id,
-        "userSecret": user_secret,
-        "connectionType": connection_type,
-    }
-    if SNAPTRADE_REDIRECT_URI:
-        redirect_with_broker = SNAPTRADE_REDIRECT_URI
-        separator = "&" if "?" in redirect_with_broker else "?"
-        redirect_with_broker = f"{redirect_with_broker}{separator}broker={broker}"
-        params["redirectURI"] = redirect_with_broker
-    if SNAPTRADE_SANDBOX:
-        params["sandbox"] = "true"
-
-    query = urlencode(params)
-    return f"{SNAPTRADE_APP_URL}/login?{query}"
+    """Thin wrapper to generate a SnapTrade connect URL."""
+    return generate_connection_url(
+        user_id=user_id,
+        user_secret=user_secret,
+        broker=broker,
+        connection_type=connection_type,
+        dark_mode=True,
+    )
 
 
 class SnapTradeClient:
     """
-    SnapTrade API client for account and trade management
+    SnapTrade API client for account and trade management.
+    Wrapper around the official snaptrade-python-sdk.
     """
     
-    def __init__(self, user_token: str, api_key: str = SNAPTRADE_API_KEY):
+    def __init__(self, user_id: str, user_secret: str):
         """
-        Initialize SnapTrade client
+        Initialize SnapTrade client for a specific user.
         
         Args:
-            user_token: User's SnapTrade access token (stored in User.snaptrade_token)
-            api_key: SnapTrade API key (from environment)
+            user_id: SnapTrade user ID
+            user_secret: SnapTrade user secret
         """
-        self.user_token = user_token
-        self.api_key = api_key
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        })
+        self.user_id = user_id
+        self.user_secret = user_secret
+        self.client = get_snaptrade_client()
     
     # ========================================================================
     # Account Methods
@@ -252,40 +226,39 @@ class SnapTradeClient:
     
     def get_accounts(self) -> List[Account]:
         """
-        Get all user accounts
+        Get all user accounts.
         
         Returns:
             List of Account objects
         """
         try:
-            url = f"{SNAPTRADE_API_URL}/accounts"
-            params = {"userToken": self.user_token}
-            
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
+            response = self.client.account_information.list_user_accounts(
+                user_id=self.user_id,
+                user_secret=self.user_secret
+            )
             
             accounts = []
-            for account_data in response.json():
+            for account_data in response.body:
                 account = Account(
-                    id=account_data.get("id"),
-                    name=account_data.get("name"),
-                    broker=account_data.get("broker"),
+                    id=account_data.get("id", ""),
+                    name=account_data.get("name", ""),
+                    broker=account_data.get("institution_name", ""),
                     currency=account_data.get("currency", "CAD"),
-                    type=account_data.get("account_type", ""),
-                    balance=float(account_data.get("balance", 0)),
-                    buying_power=float(account_data.get("buying_power", 0))
+                    type=account_data.get("meta", {}).get("type", ""),
+                    balance=float(account_data.get("balance", {}).get("total", 0)),
+                    buying_power=float(account_data.get("cash_restrictions", [{}])[0].get("buying_power", {}).get("amount", 0))
                 )
                 accounts.append(account)
             
-            logger.info(f"Retrieved {len(accounts)} accounts for user")
+            logger.info(f"Retrieved {len(accounts)} accounts for user {self.user_id}")
             return accounts
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get accounts: {str(e)}")
-            raise SnapTradeClientError(f"Failed to get accounts: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to get accounts: {e}")
+            raise SnapTradeClientError(f"Failed to get accounts: {e}")
     
     def get_account(self, account_id: str) -> Optional[Account]:
-        """Get single account details"""
+        """Get single account details by ID."""
         accounts = self.get_accounts()
         for account in accounts:
             if account.id == account_id:
@@ -296,356 +269,338 @@ class SnapTradeClient:
     # Holdings Methods
     # ========================================================================
     
-    def get_holdings(self, account_id: Optional[str] = None) -> List[Holding]:
+    def get_holdings(self, account_id: str) -> List[Holding]:
         """
-        Get all holdings across accounts (or specific account)
+        Get holdings for a specific account.
         
         Args:
-            account_id: Optional account ID to filter by
+            account_id: Account ID to get holdings for
         
         Returns:
             List of Holding objects
         """
         try:
-            url = f"{SNAPTRADE_API_URL}/holdings"
-            params = {"userToken": self.user_token}
-            if account_id:
-                params["accountId"] = account_id
-            
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
+            response = self.client.account_information.get_user_account_positions(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                account_id=account_id
+            )
             
             holdings = []
-            for holding_data in response.json():
+            for position in response.body:
+                symbol_data = position.get("symbol", {})
                 holding = Holding(
-                    symbol=holding_data.get("symbol"),
-                    name=holding_data.get("name", ""),
-                    quantity=float(holding_data.get("quantity", 0)),
-                    price=float(holding_data.get("price", 0)),
-                    market_value=float(holding_data.get("market_value", 0)),
-                    currency=holding_data.get("currency", "CAD"),
-                    percent_of_portfolio=float(holding_data.get("percent_of_portfolio", 0))
+                    symbol=symbol_data.get("symbol", ""),
+                    name=symbol_data.get("description", ""),
+                    quantity=float(position.get("units", 0)),
+                    price=float(position.get("price", 0)),
+                    market_value=float(position.get("market_value", 0)),
+                    currency=position.get("currency", {}).get("code", "CAD"),
+                    percent_of_portfolio=0.0  # Calculate if needed
                 )
                 holdings.append(holding)
             
-            logger.info(f"Retrieved {len(holdings)} holdings")
+            logger.info(f"Retrieved {len(holdings)} holdings for account {account_id}")
             return holdings
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get holdings: {str(e)}")
-            raise SnapTradeClientError(f"Failed to get holdings: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to get holdings: {e}")
+            raise SnapTradeClientError(f"Failed to get holdings: {e}")
     
-    def get_holding_performance(self, symbol: str, account_id: Optional[str] = None) -> Dict:
+    # ========================================================================
+    # Quote Methods
+    # ========================================================================
+    
+    def get_quotes(self, account_id: str, symbols: str) -> List[Dict]:
         """
-        Get performance metrics for a specific holding
+        Get quotes for symbols.
+        
+        Args:
+            account_id: Account ID
+            symbols: Comma-separated symbols (e.g., "AAPL,GOOGL")
         
         Returns:
-            Dict with gain, gain_percent, cost_basis, etc.
+            List of quote dictionaries
         """
         try:
-            url = f"{SNAPTRADE_API_URL}/holdings/{symbol}/performance"
-            params = {"userToken": self.user_token}
-            if account_id:
-                params["accountId"] = account_id
+            response = self.client.trading.get_user_account_quotes(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                symbols=symbols,
+                account_id=account_id
+            )
             
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            
-            return response.json()
+            return response.body
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get performance for {symbol}: {str(e)}")
-            raise SnapTradeClientError(f"Failed to get performance: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to get quotes: {e}")
+            raise SnapTradeClientError(f"Failed to get quotes: {e}")
     
     # ========================================================================
     # Trade Execution Methods
     # ========================================================================
     
-    def place_order(
+    def check_order_impact(
         self,
         account_id: str,
-        symbol: str,
-        quantity: float,
-        side: str,
-        order_type: str = "market",
-        limit_price: Optional[float] = None
-    ) -> TradeOrder:
-        """
-        Place a trade order
-        
-        Args:
-            account_id: Account to trade in
-            symbol: Security symbol (e.g., "TSX:XUS")
-            quantity: Number of shares
-            side: "BUY" or "SELL"
-            order_type: "market" or "limit"
-            limit_price: Price for limit orders
-        
-        Returns:
-            TradeOrder with execution details
-        """
-        try:
-            url = f"{SNAPTRADE_API_URL}/accounts/{account_id}/orders"
-            
-            payload = {
-                "userToken": self.user_token,
-                "symbol": symbol,
-                "quantity": quantity,
-                "side": side.upper(),
-                "orderType": order_type,
-            }
-            
-            if order_type == "limit" and limit_price:
-                payload["limitPrice"] = limit_price
-            
-            response = self.session.post(url, json=payload)
-            response.raise_for_status()
-            
-            order_data = response.json()
-            
-            trade = TradeOrder(
-                order_id=order_data.get("orderId"),
-                symbol=symbol,
-                quantity=quantity,
-                price=float(order_data.get("executionPrice", limit_price or 0)),
-                side=side.upper(),
-                status=order_data.get("status", "PENDING"),
-                timestamp=datetime.utcnow()
-            )
-            
-            logger.info(f"Order placed: {side} {quantity} {symbol} @ {trade.price}")
-            return trade
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to place order: {str(e)}")
-            raise SnapTradeClientError(f"Failed to place order: {str(e)}")
-    
-    def buy(
-        self,
-        account_id: str,
-        symbol: str,
-        quantity: float,
-        limit_price: Optional[float] = None
-    ) -> TradeOrder:
-        """Buy shares"""
-        return self.place_order(
-            account_id=account_id,
-            symbol=symbol,
-            quantity=quantity,
-            side="BUY",
-            order_type="limit" if limit_price else "market",
-            limit_price=limit_price
-        )
-    
-    def sell(
-        self,
-        account_id: str,
-        symbol: str,
-        quantity: float,
-        limit_price: Optional[float] = None
-    ) -> TradeOrder:
-        """Sell shares"""
-        return self.place_order(
-            account_id=account_id,
-            symbol=symbol,
-            quantity=quantity,
-            side="SELL",
-            order_type="limit" if limit_price else "market",
-            limit_price=limit_price
-        )
-    
-    def cancel_order(self, account_id: str, order_id: str) -> bool:
-        """Cancel pending order"""
-        try:
-            url = f"{SNAPTRADE_API_URL}/accounts/{account_id}/orders/{order_id}"
-            
-            response = self.session.delete(
-                url,
-                params={"userToken": self.user_token}
-            )
-            response.raise_for_status()
-            
-            logger.info(f"Order {order_id} cancelled")
-            return True
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to cancel order: {str(e)}")
-            raise SnapTradeClientError(f"Failed to cancel order: {str(e)}")
-    
-    # ========================================================================
-    # Performance Methods
-    # ========================================================================
-    
-    def get_portfolio_performance(
-        self,
-        account_id: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        action: str,
+        order_type: str,
+        price: Optional[float],
+        stop: Optional[float],
+        time_in_force: str,
+        units: Optional[float],
+        universal_symbol_id: str
     ) -> Dict:
         """
-        Get portfolio performance metrics
-        
-        Args:
-            account_id: Optional account filter
-            start_date: YYYY-MM-DD format
-            end_date: YYYY-MM-DD format
+        Check the impact of an order before placing it.
         
         Returns:
-            Dict with return_pct, total_gain, total_gain_pct, etc.
+            Dict with order impact including tradeId for placing checked order
         """
         try:
-            url = f"{SNAPTRADE_API_URL}/performance"
+            response = self.client.trading.get_order_impact(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                account_id=account_id,
+                action=action,
+                order_type=order_type,
+                price=price,
+                stop=stop,
+                time_in_force=time_in_force,
+                units=units,
+                universal_symbol_id=universal_symbol_id
+            )
             
-            params = {"userToken": self.user_token}
-            if account_id:
-                params["accountId"] = account_id
-            if start_date:
-                params["startDate"] = start_date
-            if end_date:
-                params["endDate"] = end_date
-            
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            
-            return response.json()
+            return response.body
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get performance: {str(e)}")
-            raise SnapTradeClientError(f"Failed to get performance: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to check order impact: {e}")
+            raise SnapTradeClientError(f"Failed to check order impact: {e}")
     
-    # ========================================================================
-    # OAuth Methods (for initial authentication)
-    # ========================================================================
-    
-    @staticmethod
-    def get_oauth_url(client_id: str, redirect_uri: str) -> str:
+    def place_checked_order(self, account_id: str, trade_id: str) -> Dict:
         """
-        Get OAuth authorization URL for user login
+        Place a checked order using tradeId from check_order_impact.
         
         Args:
-            client_id: SnapTrade application ID
-            redirect_uri: Callback URL after login
+            account_id: Account ID
+            trade_id: Trade ID from check_order_impact response
         
         Returns:
-            Authorization URL for redirect
-        """
-        url = f"{SNAPTRADE_API_URL}/oauth/authorize"
-        params = {
-            "clientId": client_id,
-            "redirectUri": redirect_uri,
-            "scope": "accounts holdings orders"
-        }
-        
-        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        return f"{url}?{query_string}"
-    
-    @staticmethod
-    def exchange_code_for_token(
-        client_id: str,
-        client_secret: str,
-        authorization_code: str,
-        redirect_uri: str
-    ) -> str:
-        """
-        Exchange authorization code for access token
-        
-        Args:
-            client_id: SnapTrade application ID
-            client_secret: SnapTrade application secret
-            authorization_code: Code from OAuth callback
-            redirect_uri: Original callback URL
-        
-        Returns:
-            User access token
+            Order response from broker
         """
         try:
-            url = f"{SNAPTRADE_API_URL}/oauth/token"
+            response = self.client.trading.place_order(
+                trade_id=trade_id,
+                user_id=self.user_id,
+                user_secret=self.user_secret
+            )
             
-            payload = {
-                "clientId": client_id,
-                "clientSecret": client_secret,
-                "authorizationCode": authorization_code,
-                "redirectUri": redirect_uri
-            }
-            
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            
-            token = response.json().get("accessToken")
-            logger.info("OAuth token exchanged successfully")
-            return token
+            logger.info(f"Placed checked order with tradeId: {trade_id}")
+            return response.body
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to exchange OAuth code: {str(e)}")
-            raise SnapTradeClientError(f"OAuth exchange failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to place checked order: {e}")
+            raise SnapTradeClientError(f"Failed to place order: {e}")
+    
+    def place_force_order(
+        self,
+        account_id: str,
+        action: str,
+        order_type: str,
+        price: Optional[float],
+        stop: Optional[float],
+        time_in_force: str,
+        units: Optional[float],
+        universal_symbol_id: str
+    ) -> Dict:
+        """
+        Place an order without checking (force place).
+        
+        Use check_order_impact + place_checked_order for safer workflow.
+        """
+        try:
+            response = self.client.trading.place_force_order(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                account_id=account_id,
+                action=action,
+                order_type=order_type,
+                price=price,
+                stop=stop,
+                time_in_force=time_in_force,
+                units=units,
+                universal_symbol_id=universal_symbol_id
+            )
+            
+            logger.info(f"Placed force order")
+            return response.body
+        
+        except Exception as e:
+            logger.error(f"Failed to place force order: {e}")
+            raise SnapTradeClientError(f"Failed to place order: {e}")
+    
+    def get_account_orders(self, account_id: str) -> List[Dict]:
+        """Get all orders for an account."""
+        try:
+            response = self.client.account_information.get_user_account_orders(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                account_id=account_id
+            )
+            
+            return response.body
+        
+        except Exception as e:
+            logger.error(f"Failed to get orders: {e}")
+            raise SnapTradeClientError(f"Failed to get orders: {e}")
+    
+    # ========================================================================
+    # Connection Methods
+    # ========================================================================
+    
+    def list_connections(self) -> List[Dict]:
+        """List all brokerage connections for the user."""
+        try:
+            response = self.client.connections.list_brokerage_authorizations(
+                user_id=self.user_id,
+                user_secret=self.user_secret
+            )
+            
+            return response.body
+        
+        except Exception as e:
+            logger.error(f"Failed to list connections: {e}")
+            raise SnapTradeClientError(f"Failed to list connections: {e}")
+    
+    def refresh_connection(self, authorization_id: str) -> Dict:
+        """Trigger a manual refresh of a brokerage connection."""
+        try:
+            response = self.client.connections.refresh_brokerage_authorization(
+                authorization_id=authorization_id,
+                user_id=self.user_id,
+                user_secret=self.user_secret
+            )
+            
+            logger.info(f"Refreshed connection: {authorization_id}")
+            return response.body
+        
+        except Exception as e:
+            logger.error(f"Failed to refresh connection: {e}")
+            raise SnapTradeClientError(f"Failed to refresh connection: {e}")
+    
+    def delete_connection(self, authorization_id: str) -> None:
+        """Delete a brokerage connection."""
+        try:
+            self.client.connections.remove_brokerage_authorization(
+                authorization_id=authorization_id,
+                user_id=self.user_id,
+                user_secret=self.user_secret
+            )
+            
+            logger.info(f"Deleted connection: {authorization_id}")
+        
+        except Exception as e:
+            logger.error(f"Failed to delete connection: {e}")
+            raise SnapTradeClientError(f"Failed to delete connection: {e}")
 
 
 # ============================================================================
-# Token Management (Encryption at rest)
+# Helper Functions
 # ============================================================================
 
-class TokenManager:
-    """
-    Secure token storage and retrieval
-    
-    In production:
-    - Store encrypted tokens in database
-    - Use KMS for key management
-    - Rotate keys periodically
-    """
-    
-    @staticmethod
-    def encrypt_token(token: str, key: Optional[str] = None) -> str:
-        """
-        Encrypt token for storage
-        
-        Args:
-            token: Plain text token
-            key: Encryption key (from environment)
-        
-        Returns:
-            Encrypted token
-        """
-        # In production, use cryptography library
-        # from cryptography.fernet import Fernet
-        # cipher = Fernet(key)
-        # return cipher.encrypt(token.encode()).decode()
-        
-        # For now, return as-is (implement real encryption in production)
-        return token
-    
-    @staticmethod
-    def decrypt_token(encrypted_token: str, key: Optional[str] = None) -> str:
-        """
-        Decrypt token from storage
-        
-        Returns:
-            Plain text token
-        """
-        # In production:
-        # cipher = Fernet(key)
-        # return cipher.decrypt(encrypted_token.encode()).decode()
-        
-        return encrypted_token
+def list_all_brokerages() -> List[Dict]:
+    """Get list of all supported brokerages."""
+    try:
+        snaptrade = get_snaptrade_client()
+        response = snaptrade.reference_data.list_all_brokerage_authorization_type()
+        return response.body
+    except Exception as e:
+        logger.error(f"Failed to list brokerages: {e}")
+        raise SnapTradeClientError(f"Failed to list brokerages: {e}")
+
+
+def list_all_currencies() -> List[Dict]:
+    """Get list of all supported currencies."""
+    try:
+        snaptrade = get_snaptrade_client()
+        response = snaptrade.reference_data.list_all_currencies()
+        return response.body
+    except Exception as e:
+        logger.error(f"Failed to list currencies: {e}")
+        raise SnapTradeClientError(f"Failed to list currencies: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Convenience functions used by API routers
+# ---------------------------------------------------------------------------
+
+
+def list_accounts(user_id: str, user_secret: str) -> List[Dict]:
+    client = SnapTradeClient(user_id, user_secret)
+    accounts = client.get_accounts()
+    return [account.__dict__ for account in accounts]
+
+
+def get_symbol_quote(
+    ticker: str,
+    account_id: str,
+    user_id: str,
+    user_secret: str,
+) -> Dict:
+    client = SnapTradeClient(user_id, user_secret)
+    quotes = client.get_quotes(account_id, ticker)
+    if isinstance(quotes, list) and quotes:
+        return quotes[0]
+    if isinstance(quotes, dict):
+        return quotes
+    raise SnapTradeClientError("Quote not found")
+
+
+def place_equity_order(
+    account_id: str,
+    user_id: str,
+    user_secret: str,
+    universal_symbol_id: str,
+    action: str,
+    order_type: str,
+    time_in_force: str,
+    units: float,
+    limit_price: float | None = None,
+):
+    client = SnapTradeClient(user_id, user_secret)
+    return client.place_force_order(
+        account_id=account_id,
+        action=action,
+        order_type=order_type,
+        price=limit_price,
+        stop=None,
+        time_in_force=time_in_force,
+        units=units,
+        universal_symbol_id=universal_symbol_id,
+    )
 
 
 if __name__ == "__main__":
     # Example usage
     logging.basicConfig(level=logging.INFO)
     
-    # Initialize client with user token
-    client = SnapTradeClient(user_token="user_token_here")
+    # Register a new user
+    user_data = register_snaptrade_user("test_user_123")
+    user_id = user_data["userId"]
+    user_secret = user_data["userSecret"]
     
-    # Get accounts
-    accounts = client.get_accounts()
-    for account in accounts:
-        print(f"Account: {account.name} ({account.broker}) - {account.balance:.2f} {account.currency}")
+    # Generate connection URL
+    connection_url = generate_connection_url(
+        user_id=user_id,
+        user_secret=user_secret,
+        connection_type="trade"
+    )
+    print(f"Connection URL: {connection_url}")
     
-    # Get holdings
-    holdings = client.get_holdings()
-    for holding in holdings:
-        print(f"{holding.symbol}: {holding.quantity} @ {holding.price} = {holding.market_value}")
+    # Initialize client for user
+    client = SnapTradeClient(user_id=user_id, user_secret=user_secret)
     
-    # Get performance
-    perf = client.get_portfolio_performance()
-    print(f"Portfolio Return: {perf.get('return_pct', 0):.2%}")
+    # Get accounts (after user connects their brokerage)
+    # accounts = client.get_accounts()
+    # for account in accounts:
+    #     print(f"Account: {account.name} - {account.balance} {account.currency}")

@@ -1,36 +1,37 @@
 """
 Email Digest Job
 
-Sends daily email summary to clients (8:00 AM EST).
+Sends weekly email summary to clients (Saturday 12:00 PM EST).
 Includes: Portfolio snapshot, performance metrics, recent alerts, transfer recommendations.
 """
 
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 from app.models.database import SessionLocal, User, PortfolioSnapshot, Alert, AlertPreference
+from types import SimpleNamespace
 from app.core.config import get_settings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def send_daily_digest():
+async def send_weekly_digest():
     """
-    Send daily email digest to all clients who have enabled it.
-    Called daily at 8:00 AM EST by APScheduler.
+    Send weekly email digest to all clients who have enabled it.
+    Called weekly (Saturday 12:00 PM EST) by APScheduler.
     """
     db = SessionLocal()
     try:
-        # Get all active, onboarded users who want daily digest
+        # Get all active, onboarded users who want the weekly digest
         users_query = (
             db.query(User, AlertPreference)
             .outerjoin(AlertPreference, User.id == AlertPreference.user_id)
             .filter(
-                User.is_active == True,
-                User.is_onboarded == True,
+                User.active == True,
                 User.role == "client",
             )
             .all()
@@ -41,7 +42,7 @@ async def send_daily_digest():
         
         for user, alert_pref in users_query:
             try:
-                # Check if user has daily digest enabled
+                # Check if user has weekly digest enabled
                 if alert_pref and not alert_pref.daily_digest_enabled:
                     continue
                 
@@ -52,26 +53,38 @@ async def send_daily_digest():
                     .order_by(PortfolioSnapshot.recorded_at.desc())
                     .first()
                 )
-                
-                if not latest_snapshot:
-                    continue  # Skip if no portfolio data
-                
-                # Get unread alerts for this user
-                unread_alerts = (
-                    db.query(Alert)
-                    .filter(
-                        Alert.user_id == user.id,
-                        Alert.is_read == False,
-                        Alert.created_at >= datetime.utcnow() - timedelta(days=1)
-                    )
-                    .order_by(Alert.created_at.desc())
-                    .limit(10)
-                    .all()
+
+                # Fallback snapshot so emails still send even if portfolio data is missing
+                snapshot = latest_snapshot or SimpleNamespace(
+                    total_value=0.0,
+                    daily_return=0.0,
+                    daily_return_pct=0.0,
+                    crypto_value=0.0,
+                    stocks_value=0.0,
+                    cash_value=0.0,
+                    recorded_at=datetime.now(timezone.utc),
                 )
                 
+                # Get unread alerts for this user
+                try:
+                    unread_alerts = (
+                        db.query(Alert)
+                        .filter(
+                            Alert.user_id == user.id,
+                            Alert.is_read == False,
+                            Alert.created_at >= datetime.now(timezone.utc) - timedelta(days=7)
+                        )
+                        .order_by(Alert.created_at.desc())
+                        .limit(10)
+                        .all()
+                    )
+                except Exception:
+                    # Older schemas may not have is_read; fallback to no alerts
+                    unread_alerts = []
+                
                 # Build email content
-                subject = f"Portfolio Summary - {datetime.now().strftime('%B %d, %Y')}"
-                html_content = _build_digest_html(user, latest_snapshot, unread_alerts)
+                subject = f"Weekly Portfolio Summary - {datetime.now(timezone.utc).strftime('%B %d, %Y')}"
+                html_content = _build_digest_html(user, snapshot, unread_alerts)
                 
                 # Send email
                 _send_email(
@@ -83,24 +96,25 @@ async def send_daily_digest():
                 sent_count += 1
                 
                 # Mark alerts as email sent (but not as read)
-                for alert in unread_alerts:
-                    alert.email_sent = True
-                db.commit()
+                if unread_alerts:
+                    for alert in unread_alerts:
+                        alert.email_sent = True
+                    db.commit()
                 
             except Exception as e:
                 logger.error(f"Failed to send digest to user {user.email}: {str(e)}", exc_info=True)
                 error_count += 1
         
-        logger.info(f"[OK] Daily email digests sent: {sent_count} success, {error_count} errors")
+        logger.info(f"[OK] Weekly email digests sent: {sent_count} success, {error_count} errors")
         
     except Exception as e:
-        logger.error(f"Failed to send daily digests: {str(e)}", exc_info=True)
+        logger.error(f"Failed to send weekly digests: {str(e)}", exc_info=True)
     finally:
         db.close()
 
 
 def _build_digest_html(user: User, snapshot: PortfolioSnapshot, alerts: list) -> str:
-    """Build HTML email content for daily digest"""
+    """Build HTML email content for weekly digest"""
     
     alerts_html = ""
     if alerts:
@@ -112,7 +126,7 @@ def _build_digest_html(user: User, snapshot: PortfolioSnapshot, alerts: list) ->
     html = f"""
     <html>
     <body style="font-family: Arial, sans-serif; color: #333;">
-        <h2>Portfolio Summary - {datetime.now().strftime('%B %d, %Y')}</h2>
+        <h2>Weekly Portfolio Summary - {datetime.now().strftime('%B %d, %Y')}</h2>
         
         <h3>Portfolio Value</h3>
         <p>
@@ -154,7 +168,8 @@ def _send_email(to_email: str, subject: str, html_content: str) -> bool:
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = settings.SMTP_FROM_EMAIL
+        from_name = getattr(settings, "SMTP_FROM_NAME", None) or "Portfolio Management System"
+        msg["From"] = formataddr((from_name, settings.SMTP_FROM_EMAIL))
         msg["To"] = to_email
         
         # Attach HTML content

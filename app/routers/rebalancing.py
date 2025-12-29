@@ -10,7 +10,7 @@ Endpoints:
 from fastapi import APIRouter, HTTPException, Query, Depends
 from sqlalchemy.orm import Session
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import uuid
 
@@ -118,8 +118,8 @@ async def rebalance_user(
                     price=next(p.price for p in current_positions if p.symbol == trade["symbol"]),
                     side=trade["action"],
                     status="executed",
-                    created_at=datetime.utcnow(),
-                    executed_at=datetime.utcnow()
+                    created_at=datetime.now(timezone.utc),
+                    executed_at=datetime.now(timezone.utc)
                 )
                 db.add(transaction)
                 trade["status"] = "executed"
@@ -201,8 +201,8 @@ async def rebalance_all_users(
                                     price=pos.price,
                                     side="BUY" if drift > 0 else "SELL",
                                     status="executed",
-                                    created_at=datetime.utcnow(),
-                                    executed_at=datetime.utcnow()
+                                    created_at=datetime.now(timezone.utc),
+                                    executed_at=datetime.now(timezone.utc)
                                 )
                                 db.add(transaction)
                     
@@ -221,7 +221,7 @@ async def rebalance_all_users(
             "users_rebalanced": rebalanced,
             "users_failed": failed,
             "dry_run": dry_run,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
         # PLACEHOLDER: Bulk rebalancing - integrate with portfolio manager

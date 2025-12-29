@@ -6,7 +6,7 @@ Creates alerts in database and triggers appropriate email notifications.
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 
@@ -57,7 +57,7 @@ async def create_alert_with_email(
             message=message,
             is_read=False,
             email_sent=False,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         db.add(alert)
         db.commit()

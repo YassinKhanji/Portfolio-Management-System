@@ -16,7 +16,7 @@ from pathlib import Path
 import itertools
 from sqlalchemy.orm import Session
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func, text
 
@@ -69,15 +69,15 @@ async def get_regime_status():
                 "dir_regime": 1,
                 "confidence": 0.85,
                 "btc_season": "BULL",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             },
             "equities": {
                 "regime": "BULL",
                 "confidence": 0.75,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             },
             "combined_signal": "RISK_ON",  # Derived from both
-            "last_updated": datetime.utcnow().isoformat() + "Z"
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
         logger.info(f"Regime status: crypto={response['crypto']['season']}, equities={response['equities']['regime']}")
@@ -93,15 +93,15 @@ async def get_regime_status():
                 "dir_regime": 1,
                 "confidence": 0.0,
                 "btc_season": "UNKNOWN",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             },
             "equities": {
                 "regime": "UNKNOWN",
                 "confidence": 0.0,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             },
             "combined_signal": "UNKNOWN",
-            "last_updated": datetime.utcnow().isoformat() + "Z",
+            "last_updated": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         }
 
@@ -126,7 +126,7 @@ async def get_system_health(db: Session = Depends(get_db)):
     """
     try:
         logger.info("System health check requested")
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Defaults
         database_connected = False
@@ -170,6 +170,15 @@ async def get_system_health(db: Session = Depends(get_db)):
                     system_status = SystemStatusModel(id="system")
         except Exception as status_error:
             logger.warning(f"Failed to load system status record: {status_error}")
+
+        def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
+            """Normalize naive datetimes to UTC for safe arithmetic."""
+            if dt is None:
+                return None
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        last_market_refresh = _ensure_aware(last_market_refresh)
+        last_benchmark_refresh = _ensure_aware(last_benchmark_refresh)
 
         if last_market_refresh:
             market_data_age_minutes = int((now - last_market_refresh).total_seconds() / 60)
@@ -230,7 +239,7 @@ async def get_system_health(db: Session = Depends(get_db)):
             "total_aum": 0.0,
             "emergency_stop": False,
             "last_rebalance": None,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         }
 
@@ -347,7 +356,7 @@ async def get_system_alerts(
                 "type": "regime_change",
                 "severity": "info",
                 "message": "Regime changed from BULL to SIDEWAYS",
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "read": False
             }
         ]
@@ -375,7 +384,7 @@ async def emergency_stop(reason: str = "Manual admin stop", db: Session = Depend
         if not system_status:
             system_status = SystemStatusModel(id="system")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         system_status.emergency_stop_active = True
         system_status.emergency_stop_reason = reason
         system_status.emergency_stop_triggered_at = now
@@ -415,7 +424,7 @@ async def emergency_stop_reset(db: Session = Depends(get_db)):
         if not system_status:
             system_status = SystemStatusModel(id="system")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         system_status.emergency_stop_active = False
         system_status.emergency_stop_reason = None
         system_status.emergency_stop_triggered_at = None

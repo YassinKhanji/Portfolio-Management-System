@@ -7,7 +7,7 @@ Owner-gated endpoints for managing users and roles.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..models.database import SessionLocal, User
 from ..routers.auth import get_current_user, get_password_hash
@@ -81,7 +81,7 @@ def create_admin_user(
         full_name=full_name or email,
         role="admin",
         active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(user)
     db.commit()
@@ -121,7 +121,7 @@ def promote_user_to_admin(
         }
 
     user.role = "admin"
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(timezone.utc)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -152,7 +152,7 @@ def demote_user_to_client(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Owner cannot be demoted")
 
     user.role = "client"
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(timezone.utc)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -163,6 +163,64 @@ def demote_user_to_client(
         "full_name": user.full_name,
         "role": user.role,
         "status": "Client",
+        "active": user.active,
+        "updated_at": user.updated_at.isoformat() + "Z" if user.updated_at else None,
+    }
+
+
+@router.post("/users/{user_id}/suspend")
+def suspend_user(
+    user_id: str,
+    _: User = Depends(require_owner),
+    db: Session = Depends(get_db)
+):
+    """Suspend a user account (server-side enforcement via login guard)."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    settings = get_settings()
+    if user.email == getattr(settings, "ADMIN_EMAIL", ""):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Owner cannot be suspended")
+
+    user.active = False
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "id": user.id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "active": user.active,
+        "updated_at": user.updated_at.isoformat() + "Z" if user.updated_at else None,
+    }
+
+
+@router.post("/users/{user_id}/unsuspend")
+def unsuspend_user(
+    user_id: str,
+    _: User = Depends(require_owner),
+    db: Session = Depends(get_db)
+):
+    """Re-activate a suspended user account."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.active = True
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "id": user.id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
         "active": user.active,
         "updated_at": user.updated_at.isoformat() + "Z" if user.updated_at else None,
     }

@@ -5,7 +5,7 @@ Monitors system health and creates alerts for issues.
 """
 
 from app.models.database import SessionLocal, SystemStatus, Alert, Log
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ def check_system_health():
     
     try:
         # Get current timestamp
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         
         # Create/update system status (single row keyed by id="system")
         status = db.query(SystemStatus).filter(SystemStatus.id == "system").first()
@@ -61,7 +61,7 @@ def check_system_health():
             
             # Log the error
             log = Log(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 level="error",
                 message=f"Health check failed: {str(e)}",
                 component="health_check_job"

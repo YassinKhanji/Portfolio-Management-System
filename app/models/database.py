@@ -21,7 +21,7 @@ Tables:
 from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, JSON, Text, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import os
 from dotenv import load_dotenv
@@ -74,8 +74,8 @@ class User(Base):
     rebalance_frequency = Column(String, default="weekly")
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Additional metadata
     metadata_json = Column(JSON, default={})
@@ -107,8 +107,8 @@ class Connection(Base):
     
     # Timestamps
     connected_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class Position(Base):
@@ -131,8 +131,8 @@ class Position(Base):
     target_percentage = Column(Float, default=0.0)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), index=True)
     
     # Metadata
     metadata_json = Column(JSON, default={})
@@ -162,7 +162,7 @@ class PortfolioSnapshot(Base):
     allocation_snapshot = Column(JSON, default={})  # {"crypto": 0.20, "stocks": 0.60, "cash": 0.20}
     
     # Timestamp (in user's local timezone)
-    recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
+    recorded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     
     # For aggregation
     aggregation_level = Column(String, default="4h")  # 4h, daily, weekly (after 90 days)
@@ -188,7 +188,7 @@ class Transaction(Base):
     status = Column(String, default="pending")  # pending, filled, partially_filled, failed, cancelled
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     executed_at = Column(DateTime, nullable=True)
     
     # Metadata
@@ -211,8 +211,8 @@ class RiskProfile(Base):
     questionnaire_responses = Column(JSON, default={})  # Store answers to risk questionnaire
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class Regime(Base):
@@ -220,7 +220,7 @@ class Regime(Base):
     __tablename__ = "regimes"
     
     id = Column(String, primary_key=True)  # UUID
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     
     # Crypto regime (from regime detection model)
     crypto_regime = Column(String, nullable=False)  # HODL, Risk Off, BTC Season, Altcoin Season, Risk On
@@ -242,7 +242,7 @@ class Log(Base):
     __tablename__ = "logs"
     
     id = Column(String, primary_key=True)  # UUID
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     
     # Log details
     level = Column(String, nullable=False)  # 'debug', 'info', 'warning', 'error', 'critical'
@@ -282,7 +282,7 @@ class Alert(Base):
     email_sent = Column(Boolean, default=False)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     read_at = Column(DateTime, nullable=True)
     
     # Additional context
@@ -311,8 +311,8 @@ class AlertPreference(Base):
     daily_digest_time = Column(String, default="08:00")  # HH:MM format, EST
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class SystemStatus(Base):
@@ -348,7 +348,7 @@ class SystemStatus(Base):
     total_aum = Column(Float, default=0.0)  # Total Assets Under Management
     
     # Last update
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================

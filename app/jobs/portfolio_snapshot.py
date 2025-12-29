@@ -6,7 +6,7 @@ Snapshots are taken in user's local timezone.
 """
 
 from app.models.database import SessionLocal, User, Position, PortfolioSnapshot
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import logging
 import uuid
@@ -84,7 +84,7 @@ async def create_snapshots():
                     daily_return_pct=daily_return_pct,
                     positions_snapshot=positions_snapshot,
                     allocation_snapshot=allocation_snapshot,
-                    recorded_at=datetime.utcnow(),
+                    recorded_at=datetime.now(timezone.utc),
                     aggregation_level="4h"
                 )
                 

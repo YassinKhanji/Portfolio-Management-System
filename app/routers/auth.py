@@ -4,10 +4,10 @@ Authentication Router
 Handles user authentication with JWT tokens.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 import uuid
 import jwt
@@ -17,13 +17,14 @@ import logging
 
 from ..models.database import SessionLocal, User, Connection
 from ..services.snaptrade_integration import (
-    provision_snaptrade_user,
+    register_snaptrade_user,
     build_connect_url,
     list_accounts,
     get_symbol_quote,
     place_equity_order,
     SnapTradeClientError,
 )
+from ..services.email_service import get_email_service
 import os
 from ..core.config import get_settings
 
@@ -102,7 +103,18 @@ def ensure_snaptrade_connections(user: User, db: Session) -> dict:
     """
 
     changed = False
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+
+    # Reuse a single SnapTrade user for all broker connections; register once if none exist.
+    existing_conn = (
+        db.query(Connection)
+        .filter(Connection.user_id == user.id)
+        .first()
+    )
+    shared_uid = existing_conn.snaptrade_user_id if existing_conn else None
+    shared_secret = existing_conn.snaptrade_user_secret if existing_conn else None
+    if not shared_uid or not shared_secret:
+        shared_uid, shared_secret = register_snaptrade_user(user.id)
 
     for broker, cfg in BROKER_CONFIG.items():
         conn = (
@@ -112,12 +124,11 @@ def ensure_snaptrade_connections(user: User, db: Session) -> dict:
         )
 
         if not conn:
-            uid, secret = provision_snaptrade_user(user.email)
             conn = Connection(
                 id=str(uuid.uuid4()),
                 user_id=user.id,
-                snaptrade_user_id=uid,
-                snaptrade_user_secret=secret,
+                snaptrade_user_id=shared_uid,
+                snaptrade_user_secret=shared_secret,
                 account_type=cfg["account_type"],
                 broker=broker,
                 is_connected=False,
@@ -130,11 +141,10 @@ def ensure_snaptrade_connections(user: User, db: Session) -> dict:
         else:
             # Repair missing credentials if needed
             if not conn.snaptrade_user_id or not conn.snaptrade_user_secret:
-                uid, secret = provision_snaptrade_user(user.email)
                 if not conn.snaptrade_user_id:
-                    conn.snaptrade_user_id = uid
+                    conn.snaptrade_user_id = shared_uid
                 if not conn.snaptrade_user_secret:
-                    conn.snaptrade_user_secret = secret
+                    conn.snaptrade_user_secret = shared_secret
                 conn.connection_status = conn.connection_status or "pending"
                 conn.updated_at = now
                 changed = True
@@ -168,9 +178,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -205,6 +215,32 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if user is None:
         raise credentials_exception
     return user
+
+
+def get_current_user_optional(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> Optional[User]:
+    """Return user if a Bearer token is provided; otherwise None.
+
+    SnapTrade callback redirects cannot send Authorization headers, so we allow
+    anonymous access and later validate using userId/userSecret against stored
+    connections.
+    """
+
+    if not authorization:
+        return None
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if not email:
+            return None
+    except jwt.PyJWTError:
+        return None
+
+    return db.query(User).filter(User.email == email).first()
 
 
 def _get_connection_or_400(db: Session, user: User, broker: str) -> Connection:
@@ -261,26 +297,46 @@ async def snaptrade_callback(
     userId: str = "",
     userSecret: str = "",
     accountId: str = "",
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
-    """Handle SnapTrade redirect and mark the broker connection as linked."""
+    """Handle SnapTrade redirect and mark the broker connection as linked.
+
+    The SnapTrade redirect does not include an Authorization header. We accept
+    either a Bearer token (preferred) or the userId/userSecret pair provided by
+    SnapTrade and validate it against the stored Connection before linking.
+    """
 
     broker = broker.lower()
     if broker not in BROKER_CONFIG:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported broker")
 
-    connections = ensure_snaptrade_connections(current_user, db)
-    connection = connections.get(broker)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connection not initialized")
+    # Resolve the connection either from the authenticated user or from the query params
+    connection: Optional[Connection] = None
+    if current_user:
+        connections = ensure_snaptrade_connections(current_user, db)
+        connection = connections.get(broker)
+    elif userId and userSecret:
+        connection = (
+            db.query(Connection)
+            .filter(
+                Connection.broker == broker,
+                Connection.snaptrade_user_id == userId,
+                Connection.snaptrade_user_secret == userSecret,
+            )
+            .first()
+        )
+        current_user = connection.user if connection else None
+
+    if not connection or not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unable to validate SnapTrade connection")
 
     if userId and userId != connection.snaptrade_user_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User mismatch")
     if userSecret and userSecret != connection.snaptrade_user_secret:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Secret mismatch")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     connection.is_connected = True
     connection.connection_status = "connected"
     connection.account_id = accountId or connection.account_id
@@ -337,7 +393,7 @@ async def snaptrade_accounts(
         first_id = accounts[0].get("id") or accounts[0].get("account_id")
         if first_id:
             connection.account_id = first_id
-            connection.updated_at = datetime.utcnow()
+            connection.updated_at = datetime.now(timezone.utc)
             db.add(connection)
             db.commit()
 
@@ -539,13 +595,13 @@ async def snaptrade_connections_admin(
 
 
 def ensure_snaptrade_identity(user: User, db: Session) -> User:
-    """Provision SnapTrade identifiers on first login/creation.
+    """register SnapTrade identifiers on first login/creation.
 
     Only runs once per user; if identifiers already exist, no-op.
     """
     changed = False
     if not user.snaptrade_user_id or not user.snaptrade_token:
-        snap_uid, snap_token = provision_snaptrade_user(user.email)
+        snap_uid, snap_token = register_snaptrade_user(user.id)
         if not user.snaptrade_user_id:
             user.snaptrade_user_id = snap_uid
         if not user.snaptrade_token:
@@ -553,7 +609,7 @@ def ensure_snaptrade_identity(user: User, db: Session) -> User:
         changed = True
     if changed:
         user.snaptrade_linked = False  # ensure link flow runs client-side
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -590,14 +646,14 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
             full_name=user_data.full_name,
             role="client",
             active=True,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         
         db.add(new_user)
         db.commit()
         db.refresh(new_user)
 
-        # Ensure per-broker SnapTrade identities are provisioned immediately
+        # Ensure per-broker SnapTrade identities are registered immediately
         ensure_snaptrade_connections(new_user, db)
         
         # Create access token
@@ -654,16 +710,38 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # First-login provisioning for per-broker SnapTrade identifiers
+        # First-login registering for per-broker SnapTrade identifiers
         ensure_snaptrade_connections(user, db)
 
-        # Mark first/last login and activate account on first successful login
-        now = datetime.utcnow()
+        # First-login bookkeeping and welcome email (sent once)
+        now = datetime.now(timezone.utc)
+        metadata = user.metadata_json or {}
+        welcome_already_sent = bool(metadata.get("welcome_email_sent"))
+
+        # Block suspended users
+        if user.active is False:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is suspended"
+            )
+
+        # Set first-login timestamp and update last login
         if not user.first_login_at:
             user.first_login_at = now
-            user.active = True
         user.last_login = now
-        user.updated_at = now
+
+        # Send welcome email only once per user
+        if not welcome_already_sent:
+            try:
+                await get_email_service().send_welcome_email(
+                    user_email=user.email,
+                    user_name=user.full_name or user.email.split("@")[0],
+                )
+                metadata["welcome_email_sent"] = True
+            except Exception as email_err:  # noqa: BLE001
+                logger.warning("Welcome email send failed for %s: %s", user.email, email_err)
+
+        user.metadata_json = metadata
         db.add(user)
         db.commit()
         db.refresh(user)

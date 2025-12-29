@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 import yfinance as yf
@@ -24,6 +24,9 @@ from ..models.database import (
     PortfolioSnapshot,
     RiskProfile,
     SystemStatus,
+    Alert,
+    AlertPreference,
+    Log,
 )
 from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
@@ -101,13 +104,13 @@ def _get_sp500_history() -> List[dict]:
 
     stale = True
     if fetched_at:
-        age_hours = (datetime.utcnow() - fetched_at).total_seconds() / 3600
+        age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
         stale = age_hours > 6
 
     if stale or not data:
         data = _fetch_sp500_history()
         if data:
-            _benchmark_cache["fetched_at"] = datetime.utcnow()
+            _benchmark_cache["fetched_at"] = datetime.now(timezone.utc)
             _benchmark_cache["data"] = data
     return data
 
@@ -119,13 +122,13 @@ def _get_sp500_intraday() -> List[dict]:
 
     stale = True
     if fetched_at:
-        age_hours = (datetime.utcnow() - fetched_at).total_seconds() / 3600
+        age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
         stale = age_hours > 1
 
     if stale or not data:
         data = _fetch_sp500_intraday()
         if data:
-            _benchmark_intraday_cache["fetched_at"] = datetime.utcnow()
+            _benchmark_intraday_cache["fetched_at"] = datetime.now(timezone.utc)
             _benchmark_intraday_cache["data"] = data
     return data
 
@@ -146,11 +149,17 @@ async def list_clients(db: Session = Depends(get_db)):
             .all()
         )
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         clients = []
         risk_counts = {"Aggressive": 0, "Balanced": 0, "Conservative": 0}
         active_today = 0
         total_aum = 0.0
+
+        def _aware(dt: Optional[datetime]) -> datetime:
+            # Normalize datetimes that may have been stored without tzinfo
+            if dt is None:
+                return now
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
         for u in users:
             total_value = float(value_by_user.get(u.id, 0.0))
@@ -168,7 +177,7 @@ async def list_clients(db: Session = Depends(get_db)):
             risk = risk_map.get(risk_raw, "Balanced")
             risk_counts[risk] = risk_counts.get(risk, 0) + 1
 
-            last_active_dt = u.updated_at or u.created_at or now
+            last_active_dt = _aware(u.updated_at) if u.updated_at else _aware(u.created_at)
             if (now - last_active_dt) <= timedelta(days=1):
                 active_today += 1
 
@@ -184,8 +193,8 @@ async def list_clients(db: Session = Depends(get_db)):
                 "risk_profile": risk,
                 "total_value": total_value,
                 "active": bool(u.active),
-                "last_active": last_active_dt.isoformat() + "Z",
-                "created_at": (u.created_at.isoformat() + "Z") if u.created_at else None,
+                "last_active": _aware(last_active_dt).isoformat(),
+                "created_at": (_aware(u.created_at).isoformat() if u.created_at else None),
                 "is_owner": is_owner,
                 "is_admin": (u.role or "").lower() == "admin" or is_owner,
             })
@@ -228,7 +237,7 @@ async def get_portfolio_health_metrics(
     - Estimates asset-class contribution using current positions.
     """
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Determine lookback window
         upper = period.upper()
@@ -473,7 +482,7 @@ async def update_client(user_id: str, payload: dict, db: Session = Depends(get_d
             if key in allowed_fields:
                 setattr(user, key, value)
 
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -502,12 +511,15 @@ async def delete_client(user_id: str, db: Session = Depends(get_db)):
         if not user:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        # Clean up related records (best-effort), including SnapTrade access
+        # Clean up related records (best-effort), including SnapTrade access and notifications
         db.query(Position).filter(Position.user_id == user_id).delete()
         db.query(Transaction).filter(Transaction.user_id == user_id).delete()
         db.query(Connection).filter(Connection.user_id == user_id).delete()
         db.query(PortfolioSnapshot).filter(PortfolioSnapshot.user_id == user_id).delete()
         db.query(RiskProfile).filter(RiskProfile.user_id == user_id).delete()
+        db.query(Alert).filter(Alert.user_id == user_id).delete()
+        db.query(AlertPreference).filter(AlertPreference.user_id == user_id).delete()
+        db.query(Log).filter(Log.user_id == user_id).delete()
 
         # Wipe SnapTrade identifiers on the user before deletion to avoid retaining secrets
         user.snaptrade_user_id = None
@@ -568,7 +580,7 @@ async def get_portfolio_metrics(
                 "total_positions": 0,
                 "active_users": 0,
                 "transactions_24h": 0,
-                "last_updated": datetime.utcnow().isoformat() + "Z",
+                "last_updated": datetime.now(timezone.utc).isoformat(),
             }
 
         # Query database for portfolio data scoped to filtered users
@@ -584,7 +596,7 @@ async def get_portfolio_metrics(
         change_24h = 2.34  # Placeholder
         
         # Get recent transaction count
-        yesterday = datetime.utcnow() - timedelta(days=1)
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
         transactions_24h = db.query(Transaction).filter(
             Transaction.created_at >= yesterday,
             Transaction.user_id.in_(user_ids)
@@ -597,7 +609,7 @@ async def get_portfolio_metrics(
             "total_positions": total_positions,
             "active_users": total_users,
             "transactions_24h": transactions_24h,
-            "last_updated": datetime.utcnow().isoformat() + "Z"
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
@@ -731,7 +743,7 @@ async def get_portfolio_performance(
         logger.info(f"Fetching performance data (period={period}, user_id={user_id}, risk_profile={risk_profile})...")
 
         # Determine lookback window and resolution (auto: hourly for 1D/7D)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         upper = period.upper()
         desired_resolution = (resolution or "auto").lower()
         use_hourly = desired_resolution == "hourly" or (desired_resolution == "auto" and upper in {"1D", "7D"})
@@ -957,7 +969,7 @@ async def get_risk_metrics(
         import numpy as np
         
         config = get_settings()
-        lookback_date = datetime.utcnow() - timedelta(days=lookback)
+        lookback_date = datetime.now(timezone.utc) - timedelta(days=lookback)
         
         # Determine which users to include based on risk profile (if provided)
         user_ids_query = db.query(User.id)
@@ -1151,7 +1163,7 @@ async def update_risk_profile(
 
         # Update user's risk profile
         user.risk_profile = request.risk_profile
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
         db.add(user)
         db.commit()
         db.refresh(user)

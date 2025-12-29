@@ -9,7 +9,7 @@ try:
 except Exception:
     CryptoRegimeDetector = None  # type: ignore
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class MarketDataService:
             
             # Check cache
             if not force and self.last_refresh:
-                age_minutes = (datetime.utcnow() - self.last_refresh).total_seconds() / 60
+                age_minutes = (datetime.now(timezone.utc) - self.last_refresh).total_seconds() / 60
                 if age_minutes < 240:  # Less than 4 hours
                     logger.info(f"Using cached data (age: {age_minutes:.0f}m)")
                     return self.cached_data
@@ -54,7 +54,7 @@ class MarketDataService:
             else:
                 logger.info("No crypto regime detector available; skipping data fetch")
                 self.cached_data = self.cached_data or None
-            self.last_refresh = datetime.utcnow()
+            self.last_refresh = datetime.now(timezone.utc)
             
             logger.info("Market data refreshed successfully")
             return self.cached_data
@@ -85,5 +85,5 @@ class MarketDataService:
         if self.last_refresh is None:
             return None
         
-        age_minutes = (datetime.utcnow() - self.last_refresh).total_seconds() / 60
+        age_minutes = (datetime.now(timezone.utc) - self.last_refresh).total_seconds() / 60
         return int(age_minutes)

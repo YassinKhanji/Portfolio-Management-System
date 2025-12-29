@@ -15,7 +15,7 @@ except Exception:
     RegimeDetectionService = None  # type: ignore
 from app.models.database import SessionLocal, Log, Alert, SystemStatus as SystemStatusModel
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import uuid
 
@@ -87,7 +87,7 @@ def refresh_market_data():
                 system_status = SystemStatusModel(id="system")
             system_status.market_data_available = refresh_success
             if refresh_success:
-                system_status.last_market_data_refresh = datetime.utcnow()
+                system_status.last_market_data_refresh = datetime.now(timezone.utc)
             system_status.benchmark_data_available = benchmark_success
             if benchmark_success and benchmark_timestamp:
                 system_status.last_benchmark_refresh = benchmark_timestamp
@@ -98,7 +98,7 @@ def refresh_market_data():
         # Log the refresh
         log = Log(
             id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             level="info" if refresh_success else "warning",
             message="Market data refreshed successfully" if refresh_success else "Market data refresh skipped or failed",
             component="data_refresh_job",
@@ -121,7 +121,7 @@ def refresh_market_data():
         try:
             db = SessionLocal()
             log = Log(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 level="error",
                 message=f"Data refresh failed: {str(e)}",
                 component="data_refresh_job"

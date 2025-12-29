@@ -10,9 +10,11 @@ import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from app.core.config import get_settings
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from typing import List, Dict
+
+from app.models.database import SessionLocal, Log, User
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -28,6 +30,56 @@ class EmailService:
         self.password = settings.SMTP_PASSWORD
         self.from_email = settings.SMTP_FROM_EMAIL
         self.from_name = settings.SMTP_FROM_NAME
+
+    def _get_admin_recipients(self) -> List[str]:
+        """Fetch active admin emails from the database"""
+        db = SessionLocal()
+        try:
+            admins = db.query(User).filter(User.role == "admin", User.active == True).all()
+            return [admin.email for admin in admins if admin.email]
+        except Exception as e:
+            logger.warning("Failed to fetch admin recipients: %s", e)
+            return []
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def _log_email_event(
+        self,
+        to_email: str,
+        subject: str,
+        success: bool,
+        component: str = "email_service",
+        reason: str = None,
+        metadata: Dict = None
+    ) -> None:
+        """Persist email send attempts to the logs table"""
+        db = SessionLocal()
+        try:
+            log = Log(
+                timestamp=datetime.now(timezone.utc),
+                level="info" if success else "error",
+                message=f"Email {'sent' if success else 'failed'}: {subject} -> {to_email}",
+                component=component,
+                metadata_json={
+                    "to_email": to_email,
+                    "subject": subject,
+                    "success": success,
+                    "reason": reason,
+                    **(metadata or {})
+                }
+            )
+            db.add(log)
+            db.commit()
+        except Exception as log_error:
+            logger.warning("Failed to write email log: %s", log_error)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
 
     async def send_email(
         self,
@@ -59,9 +111,22 @@ class EmailService:
                 html_content,
                 plain_text
             )
+            self._log_email_event(
+                to_email=to_email,
+                subject=subject,
+                success=result,
+                metadata={"has_plain_text": bool(plain_text)}
+            )
             return result
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {str(e)}", exc_info=True)
+            self._log_email_event(
+                to_email=to_email,
+                subject=subject,
+                success=False,
+                reason=str(e),
+                metadata={"has_plain_text": bool(plain_text)}
+            )
             return False
 
     def _send_smtp(
@@ -77,7 +142,7 @@ class EmailService:
             msg["Subject"] = subject
             msg["From"] = f"{self.from_name} <{self.from_email}>"
             msg["To"] = to_email
-            msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+            msg["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
 
             # Attach plain text (if provided) and HTML
             if plain_text:
@@ -150,7 +215,25 @@ class EmailService:
         </body>
         </html>
         """
-        return await self.send_email(user_email, subject, html_content)
+        recipients = list(dict.fromkeys([user_email] + self._get_admin_recipients()))
+        overall_success = True
+        for recipient in recipients:
+            sent = await self.send_email(recipient, subject, html_content)
+            overall_success = overall_success and sent
+
+        self._log_email_event(
+            to_email=", ".join(recipients),
+            subject=subject,
+            success=overall_success,
+            component="rebalance_notification",
+            metadata={
+                "trades_executed": trades_executed,
+                "portfolio_value": portfolio_value,
+                "recipient_count": len(recipients)
+            }
+        )
+
+        return overall_success
 
     async def send_regime_change_alert(
         self,
@@ -306,21 +389,19 @@ class EmailService:
             
             <h3>Next Steps:</h3>
             <ol>
-                <li><strong>Complete Onboarding:</strong> Connect your Kraken and Wealthsimple accounts</li>
-                <li><strong>Set Risk Profile:</strong> Choose Conservative, Balanced, or Aggressive</li>
-                <li><strong>Automatic Management:</strong> We rebalance 3 times per week automatically</li>
+                <li><strong>Complete Onboarding:</strong> Connect your Kraken and Wealthsimple accounts if you have not done so.</li>
+                <li><strong>Set Risk Profile:</strong> Switch to Conservative, Balanced, or Aggressive anytime.</li>
+                <li><strong>Automatic Management:</strong> Our Advanced Models manage your portfolio for you.</li>
             </ol>
             
             <h3>Key Features:</h3>
             <ul>
-                <li>✅ Automatic portfolio rebalancing (Sunday, Tuesday, Friday)</li>
-                <li>✅ Market regime detection (Crypto + Equities)</li>
+                <li>✅ Automatic portfolio management</li>
                 <li>✅ Real-time performance tracking</li>
-                <li>✅ Daily email digest with portfolio summary</li>
-                <li>✅ Emergency stop for peace of mind</li>
+                <li>✅ Weekly email digest with portfolio summary</li>
+                <li>✅ Our models track everything, and can stop the system preserving capital and preventing losses on your account.</li>
             </ul>
             
-            <p>If you have any questions, visit your dashboard or contact support.</p>
             
             <hr style="margin: 30px 0;">
             <p style="font-size: 0.9em; color: #666;">

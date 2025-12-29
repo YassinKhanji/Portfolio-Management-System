@@ -8,7 +8,7 @@ Usage (from Backend directory with virtualenv active):
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -36,7 +36,7 @@ def upsert_demo_user(session):
         full_name="Demo Investor",
         role="client",
         active=True,
-        created_at=datetime.utcnow() - timedelta(days=200),
+        created_at=datetime.now(timezone.utc) - timedelta(days=200),
     )
     session.add(user)
     session.commit()
@@ -79,7 +79,7 @@ def reset_snapshots(session, user_id: str, start_value: float = 100000.0, days: 
     session.query(PortfolioSnapshot).filter(PortfolioSnapshot.user_id == user_id).delete()
     session.commit()
 
-    start_date = datetime.utcnow() - timedelta(days=days)
+    start_date = datetime.now(timezone.utc) - timedelta(days=days)
     snapshots = []
     for i in range(days + 1):
         # gentle upward drift with small wiggle
