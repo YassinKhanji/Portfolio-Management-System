@@ -11,9 +11,8 @@ from sqlalchemy import func
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta, timezone
 import logging
+import requests
 
-import yfinance as yf
-import pandas as pd
 from pydantic import BaseModel
 
 from ..models.database import (
@@ -33,6 +32,7 @@ from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
 from ..services.snaptrade_integration import get_snaptrade_client
 
+settings = get_settings()
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -63,86 +63,127 @@ _benchmark_intraday_cache: Dict[str, object] = {
 }
 
 # List of S&P 500 tickers to try (fallbacks if main one fails)
-SP500_TICKERS = ["^GSPC", "SPY", "VOO", "IVV"]
+SP500_TICKERS = ["SPY", "^GSPC", "SPX"]
+
+
+def _fetch_benchmark_from_twelve_data(symbol: str = "SPY", outputsize: int = 1260) -> List[dict]:
+    """Fetch S&P 500 data from Twelve Data API.
+    
+    Free tier: 8 calls/minute, 800 calls/day
+    Sign up at twelvedata.com for an API key.
+    """
+    try:
+        api_key = settings.TWELVE_DATA_API_KEY
+        if not api_key:
+            logger.warning("TWELVE_DATA_API_KEY not configured - cannot fetch benchmark data")
+            return []
+        
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": "1day",
+            "outputsize": outputsize,  # ~5 years of trading days
+            "format": "JSON",
+            "apikey": api_key
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if "values" in data and data["values"]:
+                records = []
+                for item in data["values"]:
+                    try:
+                        day = datetime.strptime(item["datetime"], "%Y-%m-%d").date()
+                        close_val = float(item["close"])
+                        records.append({"date": day, "close": close_val})
+                    except (ValueError, KeyError):
+                        continue
+                if records:
+                    # Reverse to chronological order (API returns newest first)
+                    records.reverse()
+                    logger.info(f"Fetched {len(records)} benchmark data points from Twelve Data API ({symbol})")
+                    return records
+            else:
+                logger.warning(f"Twelve Data API returned no values for {symbol}: {data.get('message', 'No message')}")
+        else:
+            logger.warning(f"Twelve Data API returned status {response.status_code}")
+    except Exception as e:
+        logger.error(f"Twelve Data API failed for {symbol}: {e}")
+    
+    return []
+
+
+def _fetch_benchmark_intraday_from_twelve_data(symbol: str = "SPY", outputsize: int = 50) -> List[dict]:
+    """Fetch intraday S&P 500 data from Twelve Data API (hourly intervals)."""
+    try:
+        api_key = settings.TWELVE_DATA_API_KEY
+        if not api_key:
+            logger.warning("TWELVE_DATA_API_KEY not configured - cannot fetch intraday benchmark data")
+            return []
+        
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": "1h",
+            "outputsize": outputsize,  # Last ~50 hours
+            "format": "JSON",
+            "apikey": api_key
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if "values" in data and data["values"]:
+                records = []
+                for item in data["values"]:
+                    try:
+                        ts = datetime.strptime(item["datetime"], "%Y-%m-%d %H:%M:%S")
+                        ts = ts.replace(tzinfo=timezone.utc)
+                        close_val = float(item["close"])
+                        records.append({"timestamp": ts, "close": close_val})
+                    except (ValueError, KeyError):
+                        continue
+                if records:
+                    # Reverse to chronological order (API returns newest first)
+                    records.reverse()
+                    logger.info(f"Fetched {len(records)} intraday benchmark data points from Twelve Data API ({symbol})")
+                    return records
+            else:
+                logger.warning(f"Twelve Data API returned no intraday values for {symbol}")
+        else:
+            logger.warning(f"Twelve Data API intraday returned status {response.status_code}")
+    except Exception as e:
+        logger.error(f"Twelve Data API intraday failed for {symbol}: {e}")
+    
+    return []
 
 
 def _fetch_sp500_history() -> List[dict]:
-    """Fetch last 5y of SP500 daily closes, cached for reuse. Tries multiple tickers."""
+    """Fetch last 5y of SP500 daily closes using Twelve Data API."""
     for ticker in SP500_TICKERS:
-        try:
-            logger.info(f"Attempting to fetch benchmark data from {ticker}")
-            df = yf.download(ticker, period="5y", interval="1d", progress=False, timeout=30)
-            if df is None or df.empty:
-                logger.warning(f"yfinance returned empty data for {ticker}, trying next...")
-                continue
-
-            # Handle both single and multi-index columns (yfinance can return either)
-            if isinstance(df.columns, pd.MultiIndex):
-                df = df.droplevel(1, axis=1)
-            
-            df = df.reset_index()
-            
-            # Find the date and close columns (case-insensitive)
-            date_col = next((c for c in df.columns if c.lower() == 'date'), None)
-            close_col = next((c for c in df.columns if c.lower() == 'close'), None)
-            
-            if not date_col or not close_col:
-                logger.warning(f"Could not find Date/Close columns in {ticker} data: {df.columns.tolist()}")
-                continue
-            
-            records = []
-            for _, row in df.iterrows():
-                day = row[date_col].date() if hasattr(row[date_col], "date") else row[date_col]
-                close_val = row[close_col]
-                # Handle numpy arrays or single values
-                if hasattr(close_val, 'item'):
-                    close_val = close_val.item()
-                records.append({"date": day, "close": float(close_val)})
-            
-            if records:
-                logger.info(f"Successfully fetched {len(records)} benchmark data points from {ticker}")
-                return records
-                
-        except Exception as exc:
-            logger.error(f"Failed to fetch {ticker} from yfinance: {exc}")
-            continue
+        logger.info(f"Attempting to fetch benchmark data from Twelve Data API ({ticker})")
+        records = _fetch_benchmark_from_twelve_data(symbol=ticker)
+        if records:
+            return records
+        logger.warning(f"Failed to get benchmark data for {ticker}, trying next...")
     
-    logger.error("All benchmark tickers failed to return data")
+    logger.error("All benchmark tickers failed - no real market data available")
     return []
 
 
 def _fetch_sp500_intraday(days: int = 7) -> List[dict]:
-    """Fetch intraday S&P 500 (hourly) closes for the last N days."""
-    for ticker in SP500_TICKERS:
-        try:
-            df = yf.download(ticker, period=f"{days}d", interval="60m", progress=False, timeout=30)
-            if df is None or df.empty:
-                logger.warning(f"yfinance returned empty intraday data for {ticker}")
-                continue
-            
-            # Handle both single and multi-index columns
-            if isinstance(df.columns, pd.MultiIndex):
-                df = df.droplevel(1, axis=1)
-            
-            close_col = next((c for c in df.columns if c.lower() == 'close'), None)
-            if not close_col:
-                continue
-                
-            records = []
-            for idx, row in df.iterrows():
-                ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
-                close_val = row[close_col]
-                if hasattr(close_val, 'item'):
-                    close_val = close_val.item()
-                records.append({"timestamp": ts, "close": float(close_val)})
-            
-            if records:
-                return records
-                
-        except Exception as exc:
-            logger.error(f"Failed to fetch intraday {ticker} from yfinance: {exc}")
-            continue
+    """Fetch intraday S&P 500 (hourly) closes using Twelve Data API."""
+    outputsize = min(days * 7, 50)  # Twelve Data free tier limit
     
+    for ticker in SP500_TICKERS:
+        logger.info(f"Attempting to fetch intraday benchmark from Twelve Data API ({ticker})")
+        records = _fetch_benchmark_intraday_from_twelve_data(symbol=ticker, outputsize=outputsize)
+        if records:
+            return records
+        logger.warning(f"Failed to get intraday benchmark for {ticker}, trying next...")
+    
+    logger.error("All intraday benchmark sources failed - no real market data available")
     return []
 
 
@@ -826,15 +867,28 @@ async def get_portfolio_positions(
         
         result = []
         for pos in positions:
+            # Calculate change percentage from cost basis
+            change_pct = 0.0
+            if pos.cost_basis and pos.cost_basis > 0 and pos.price:
+                change_pct = ((pos.price - pos.cost_basis) / pos.cost_basis) * 100
+            
+            # Format last order time as ISO string if present
+            last_order_time_str = None
+            if pos.last_order_time:
+                last_order_time_str = pos.last_order_time.isoformat() if hasattr(pos.last_order_time, 'isoformat') else str(pos.last_order_time)
+            
             result.append({
                 "id": pos.id,
                 "symbol": pos.symbol,
-                "name": pos.symbol,
+                "name": pos.metadata_json.get('name', pos.symbol) if pos.metadata_json else pos.symbol,
                 "type": "asset",
                 "balance": pos.quantity,
                 "price": pos.price,
                 "value": pos.market_value,
-                "change_24h": 0.0,
+                "cost_basis": pos.cost_basis,
+                "change_24h": change_pct,  # Now represents change from cost basis
+                "last_order_time": last_order_time_str,
+                "last_order_side": pos.last_order_side or "HOLD",
                 "allocation_percent": pos.allocation_percentage or 0.0
             })
         

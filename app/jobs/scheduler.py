@@ -88,6 +88,20 @@ def add_jobs():
     logger.info("[OK] Added job: sync_holdings (every hour at :50)")
     
     # ========================================================================
+    # 3b. TRANSACTION SYNC: Every hour (runs at :55 past the hour)
+    # Syncs SnapTrade orders to the Transaction table for transaction history
+    # Runs 5 minutes after holdings sync to ensure positions are up to date
+    # ========================================================================
+    scheduler.add_job(
+        holdings_sync.sync_all_transactions,
+        CronTrigger(minute=55),  # Run at :55 past every hour
+        id="sync_transactions",
+        name="Sync SnapTrade Transactions",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: sync_transactions (every hour at :55)")
+    
+    # ========================================================================
     # 4. PORTFOLIO SNAPSHOTS: Every 4 hours
     # Used for performance charts and historical tracking
     # ========================================================================

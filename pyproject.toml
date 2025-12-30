@@ -33,7 +33,6 @@ dependencies = [
   "tzlocal==5.2",
   "six==1.16.0",
   "pyjwt==2.8.0",
-  "yfinance==0.2.44",
   "passlib[bcrypt]>=1.7.4",
   "snaptrade-python-sdk>=11.0.109",
 ]

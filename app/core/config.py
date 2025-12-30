@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     EXCHANGE_RATE_UPDATE_FREQUENCY_SECONDS: int = 3600  # Real-time (hourly)
     
     # ============================================================================
+    # Market Data APIs
+    # ============================================================================
+    TWELVE_DATA_API_KEY: str = os.getenv("TWELVE_DATA_API_KEY", "")  # Free tier: 800 requests/day
+    
+    # ============================================================================
     # Performance Metrics Configuration
     # ============================================================================
     # Return Calculations

@@ -33,10 +33,8 @@ DEFAULT_EXCHANGE_RATES = {
 }
 
 
-def _suppress_yfinance_logging():
-    """Suppress noisy yfinance logging."""
-    # Suppress yfinance's internal logging
-    logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+def _suppress_noisy_logging():
+    """Suppress noisy third-party logging."""
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     logging.getLogger('peewee').setLevel(logging.WARNING)
 
@@ -78,7 +76,7 @@ def _get_exchange_rate(currency: str) -> float:
     # If we haven't tried fetching yet this session, try once
     if not _initial_fetch_attempted:
         _initial_fetch_attempted = True
-        _suppress_yfinance_logging()
+        _suppress_noisy_logging()
         
         try:
             rate = _fetch_exchange_rate_api(currency)
@@ -239,5 +237,5 @@ def get_cached_rates() -> dict:
     return result
 
 
-# Suppress yfinance logging on module import
-_suppress_yfinance_logging()
+# Suppress noisy third-party logging on module import
+_suppress_noisy_logging()

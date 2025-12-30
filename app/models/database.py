@@ -128,6 +128,11 @@ class Position(Base):
     quantity = Column(Float, nullable=False)
     price = Column(Float, nullable=False)  # Current price in CAD
     market_value = Column(Float, nullable=False)  # quantity * price in CAD
+    cost_basis = Column(Float, nullable=True)  # Average purchase price per unit
+    
+    # Last order tracking
+    last_order_time = Column(DateTime, nullable=True)  # When the last order was placed
+    last_order_side = Column(String, nullable=True)  # BUY, SELL, or HOLD (no recent orders)
     
     # Allocation tracking
     allocation_percentage = Column(Float, default=0.0)

@@ -15,6 +15,7 @@ import jwt
 from pydantic import BaseModel
 import logging
 from passlib.context import CryptContext
+import html
 
 from ..models.database import SessionLocal, User, Connection, Position
 from ..services.snaptrade_integration import (
@@ -56,8 +57,10 @@ pwd_context = CryptContext(
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-# JWT settings
-SECRET_KEY = settings.JWT_SECRET_KEY if hasattr(settings, 'JWT_SECRET_KEY') else "your-secret-key-change-in-production"
+# JWT settings - SECRET_KEY must be set via environment variable
+if not hasattr(settings, 'JWT_SECRET') or not settings.JWT_SECRET:
+    raise ValueError("JWT_SECRET must be set via environment variable. Do not use hardcoded keys.")
+SECRET_KEY = settings.JWT_SECRET
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -519,8 +522,11 @@ async def snaptrade_callback(
             "snaptrade_user_id": connection.snaptrade_user_id,
         }
 
+    # Sanitize broker name to prevent XSS - use only known broker names or escape
+    safe_broker_name = html.escape(broker.title()) if broker else "Your"
+    
     # Always return a visual completion page so the portal shows "Done"
-    html = f"""
+    html_content = f"""
     <html>
         <body style='margin:0; padding:0; font-family: Helvetica, Arial, sans-serif; background:#f8f9fb;'>
             <div style='max-width: 520px; margin: 32px auto; background:#fff; border-radius:24px; padding:32px; box-shadow:0 8px 28px rgba(0,0,0,0.12); text-align:center;'>
@@ -534,7 +540,7 @@ async def snaptrade_callback(
                     </div>
                 </div>
                 <h2 style='margin:0 0 12px; font-size:28px; color:#111827;'>Connection Complete</h2>
-                <p style='margin:0 0 8px; font-size:16px; color:#374151;'>Your {broker.title()} account has been successfully connected.</p>
+                <p style='margin:0 0 8px; font-size:16px; color:#374151;'>Your {safe_broker_name} account has been successfully connected.</p>
                 <p style='margin:0 0 24px; font-size:14px; color:#6b7280;'>You can close this window.</p>
                 <a href='javascript:window.close();' style='display:block; width:100%; background:#111; color:#fff; text-decoration:none; padding:14px 0; border-radius:18px; font-size:17px; font-weight:600;'>Done</a>
             </div>
@@ -542,7 +548,7 @@ async def snaptrade_callback(
     </html>
     """
 
-    return HTMLResponse(content=html, status_code=200)
+    return HTMLResponse(content=html_content, status_code=200)
 
 
 @router.get("/auth/snaptrade/accounts/{broker}")
@@ -782,18 +788,45 @@ async def snaptrade_holdings(
     logger.info(f"Total positions returned: {len(positions_out)}")
 
     # Sync positions to the database for AUM tracking and snapshots
+    # First, get existing positions to preserve cost_basis and order tracking
+    existing_positions = {
+        p.symbol: p for p in db.query(Position).filter(Position.user_id == current_user.id).all()
+    }
+    
     try:
         # Delete existing positions for this user and re-insert fresh data
         db.query(Position).filter(Position.user_id == current_user.id).delete()
         
         for pos in positions_out:
+            symbol = pos["symbol"]
+            existing = existing_positions.get(symbol)
+            
+            # Preserve cost_basis, last_order_time, last_order_side from existing position
+            cost_basis = existing.cost_basis if existing and existing.cost_basis else None
+            last_order_time = existing.last_order_time if existing else None
+            last_order_side = existing.last_order_side if existing else "HOLD"
+            
+            # Calculate change from cost basis
+            change_24h = 0.0
+            if cost_basis and cost_basis > 0 and pos["price"]:
+                change_24h = ((pos["price"] - cost_basis) / cost_basis) * 100
+            
+            # Add these fields to the position output for the API response
+            pos["cost_basis"] = cost_basis
+            pos["change_24h"] = change_24h
+            pos["last_order_time"] = last_order_time.isoformat() if last_order_time else None
+            pos["last_order_side"] = last_order_side or "HOLD"
+            
             position = Position(
                 id=str(uuid.uuid4()),
                 user_id=current_user.id,
-                symbol=pos["symbol"],
+                symbol=symbol,
                 quantity=float(pos["quantity"]),
                 price=float(pos["price"]),
                 market_value=float(pos["market_value"]),
+                cost_basis=cost_basis,
+                last_order_time=last_order_time,
+                last_order_side=last_order_side,
                 allocation_percentage=0.0,  # Will be calculated on demand
                 target_percentage=0.0,
                 metadata_json={

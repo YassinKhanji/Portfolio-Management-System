@@ -78,6 +78,7 @@ class Holding:
     market_value: float
     currency: str
     percent_of_portfolio: float
+    average_purchase_price: float = 0.0  # Cost basis per unit
 
 
 @dataclass
@@ -417,6 +418,7 @@ class SnapTradeClient:
                             'account_id': account.id,
                             'account_name': account.name,
                             'broker': account.broker,
+                            'average_purchase_price': holding.average_purchase_price,
                         }
                         all_holdings.append(holding_dict)
                         total_holdings_value += holding.market_value
@@ -579,7 +581,8 @@ class SnapTradeClient:
                     price=final_price,
                     market_value=market_value if market_value > 0 else (quantity * final_price if final_price > 0 else 0),
                     currency=currency,
-                    percent_of_portfolio=0.0
+                    percent_of_portfolio=0.0,
+                    average_purchase_price=avg_price
                 )
                 holdings.append(holding)
                 
@@ -747,13 +750,22 @@ class SnapTradeClient:
             logger.error(f"Failed to place force order: {e}")
             raise SnapTradeClientError(f"Failed to place order: {e}")
     
-    def get_account_orders(self, account_id: str) -> List[Dict]:
-        """Get all orders for an account."""
+    def get_account_orders(self, account_id: str, days: int = 90) -> List[Dict]:
+        """Get all orders for an account.
+        
+        Args:
+            account_id: Account ID to get orders for
+            days: Number of days in the past to fetch orders (default 90)
+        
+        Returns:
+            List of order dictionaries
+        """
         try:
             response = self.client.account_information.get_user_account_orders(
                 user_id=self.user_id,
                 user_secret=self.user_secret,
-                account_id=account_id
+                account_id=account_id,
+                days=days
             )
             
             return response.body
@@ -761,6 +773,252 @@ class SnapTradeClient:
         except Exception as e:
             logger.error(f"Failed to get orders: {e}")
             raise SnapTradeClientError(f"Failed to get orders: {e}")
+    
+    def get_all_account_orders(self, days: int = 90) -> List[Dict]:
+        """
+        Get orders for all user accounts.
+        
+        Args:
+            days: Number of days to look back for orders
+        
+        Returns:
+            Combined list of all orders across all accounts
+        """
+        all_orders = []
+        try:
+            accounts = self.get_accounts()
+            for account in accounts:
+                try:
+                    orders = self.get_account_orders(account.id, days=days)
+                    if orders:
+                        all_orders.extend(orders)
+                except Exception as e:
+                    logger.warning(f"Failed to get orders for account {account.id}: {e}")
+                    continue
+            return all_orders
+        except Exception as e:
+            logger.error(f"Failed to get all account orders: {e}")
+            return []
+    
+    def get_last_orders_by_symbol(self, days: int = 90) -> Dict[str, Dict]:
+        """
+        Get the most recent order for each symbol across all accounts.
+        
+        Args:
+            days: Number of days to look back for orders
+        
+        Returns:
+            Dict mapping symbol -> {time_placed, action, status}
+            Where action is BUY or SELL and time_placed is a datetime string
+        """
+        symbol_orders: Dict[str, Dict] = {}
+        
+        try:
+            all_orders = self.get_all_account_orders(days=days)
+            
+            for order in all_orders:
+                try:
+                    # Extract symbol from nested structure
+                    symbol_data = order.get('universal_symbol', {}) or order.get('symbol', {})
+                    if isinstance(symbol_data, dict):
+                        symbol = symbol_data.get('symbol', '') or symbol_data.get('raw_symbol', '')
+                    else:
+                        symbol = str(symbol_data) if symbol_data else ''
+                    
+                    if not symbol:
+                        continue
+                    
+                    # Normalize symbol (uppercase, handle exchange suffixes)
+                    symbol = symbol.upper()
+                    
+                    # Extract order details
+                    action = order.get('action', order.get('side', '')).upper()
+                    if action not in ('BUY', 'SELL'):
+                        # Map common variations
+                        action_map = {
+                            'BUY_TO_OPEN': 'BUY',
+                            'BUY_TO_CLOSE': 'BUY',
+                            'SELL_TO_OPEN': 'SELL',
+                            'SELL_TO_CLOSE': 'SELL',
+                        }
+                        action = action_map.get(action, action)
+                    
+                    # Get time placed - try multiple possible field names
+                    time_placed = (
+                        order.get('time_placed') or 
+                        order.get('execution_time') or
+                        order.get('filled_time') or
+                        order.get('time_in_force_expiry') or
+                        order.get('trade_date') or
+                        order.get('created_at') or
+                        ''
+                    )
+                    
+                    # Parse time if it's a string
+                    if isinstance(time_placed, str) and time_placed:
+                        try:
+                            # Handle ISO format
+                            time_placed = datetime.fromisoformat(time_placed.replace('Z', '+00:00'))
+                        except ValueError:
+                            try:
+                                # Try other common formats
+                                time_placed = datetime.strptime(time_placed, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                time_placed = None
+                    elif not isinstance(time_placed, datetime):
+                        time_placed = None
+                    
+                    status = order.get('status', 'UNKNOWN').upper()
+                    
+                    # Only track EXECUTED/FILLED orders for display
+                    if status not in ('EXECUTED', 'FILLED', 'COMPLETE', 'COMPLETED'):
+                        continue
+                    
+                    # Get execution price for cost basis calculation
+                    execution_price = _to_float(order.get('execution_price', 0), 'execution_price')
+                    
+                    # Store if this is the most recent order for this symbol
+                    if symbol not in symbol_orders:
+                        symbol_orders[symbol] = {
+                            'time_placed': time_placed,
+                            'action': action,
+                            'status': status,
+                            'price': execution_price,
+                        }
+                    else:
+                        # Compare times, keep the most recent
+                        existing_time = symbol_orders[symbol].get('time_placed')
+                        if time_placed and (not existing_time or time_placed > existing_time):
+                            symbol_orders[symbol] = {
+                                'time_placed': time_placed,
+                                'action': action,
+                                'status': status,
+                                'price': execution_price,
+                            }
+                
+                except Exception as e:
+                    logger.warning(f"Failed to process order for symbol lookup: {e}")
+                    continue
+            
+            logger.info(f"Found last orders for {len(symbol_orders)} symbols")
+            return symbol_orders
+            
+        except Exception as e:
+            logger.error(f"Failed to get last orders by symbol: {e}")
+            return {}
+    
+    def get_account_activities(self, account_id: str) -> List[Dict]:
+        """
+        Get account activities (transactions) for a specific account.
+        Used to calculate cost basis from purchase history.
+        
+        Args:
+            account_id: The account ID to fetch activities for
+        
+        Returns:
+            List of activity dictionaries with symbol, price, units, type, trade_date
+        """
+        try:
+            response = self.client.account_information.get_account_activities(
+                user_id=self.user_id,
+                user_secret=self.user_secret,
+                account_id=account_id
+            )
+            
+            activities = response.body if hasattr(response, 'body') else response
+            
+            # Handle paginated response
+            if isinstance(activities, dict) and 'data' in activities:
+                activities = activities['data']
+            
+            logger.info(f"Retrieved {len(activities) if activities else 0} activities for account {account_id}")
+            return activities if isinstance(activities, list) else []
+        
+        except Exception as e:
+            logger.error(f"Failed to get account activities for {account_id}: {e}")
+            return []  # Return empty list on error, don't fail the whole sync
+    
+    def get_all_account_activities(self) -> List[Dict]:
+        """
+        Get activities for all user accounts.
+        
+        Returns:
+            Combined list of all activities across all accounts
+        """
+        all_activities = []
+        try:
+            accounts = self.get_accounts()
+            for account in accounts:
+                activities = self.get_account_activities(account.id)
+                all_activities.extend(activities)
+            return all_activities
+        except Exception as e:
+            logger.error(f"Failed to get all account activities: {e}")
+            return []
+    
+    def calculate_cost_basis(self, activities: List[Dict]) -> Dict[str, float]:
+        """
+        Calculate average cost basis per symbol from activities.
+        
+        Uses weighted average of all BUY transactions.
+        
+        Args:
+            activities: List of activities from get_account_activities
+            
+        Returns:
+            Dict mapping symbol -> average cost per unit
+        """
+        symbol_costs: Dict[str, Dict[str, float]] = {}  # symbol -> {total_cost, total_units}
+        
+        for activity in activities:
+            try:
+                activity_type = activity.get('type', '').upper()
+                
+                # Only consider BUY transactions
+                if activity_type not in ('BUY', 'BUY_TO_OPEN'):
+                    continue
+                
+                # Extract symbol from nested structure
+                symbol_data = activity.get('symbol', {})
+                if isinstance(symbol_data, dict):
+                    symbol = symbol_data.get('symbol', '') or symbol_data.get('raw_symbol', '')
+                    if isinstance(symbol, dict):
+                        symbol = symbol.get('symbol', '') or symbol.get('raw_symbol', '')
+                else:
+                    symbol = str(symbol_data) if symbol_data else ''
+                
+                if not symbol:
+                    continue
+                
+                # Store full symbol (uppercase) and also base symbol without exchange suffix
+                full_symbol = symbol.upper()
+                base_symbol = symbol.split('.')[0].upper()
+                
+                price = _to_float(activity.get('price'), 'price')
+                units = _to_float(activity.get('units'), 'units')
+                
+                if price <= 0 or units <= 0:
+                    continue
+                
+                # Store for both full and base symbol to support matching
+                for sym in [full_symbol, base_symbol]:
+                    if sym not in symbol_costs:
+                        symbol_costs[sym] = {'total_cost': 0.0, 'total_units': 0.0}
+                    symbol_costs[sym]['total_cost'] += price * units
+                    symbol_costs[sym]['total_units'] += units
+                
+            except Exception as e:
+                logger.warning(f"Failed to process activity for cost basis: {e}")
+                continue
+        
+        # Calculate average cost per unit
+        cost_basis = {}
+        for symbol, data in symbol_costs.items():
+            if data['total_units'] > 0:
+                cost_basis[symbol] = data['total_cost'] / data['total_units']
+        
+        logger.info(f"Calculated cost basis for {len(cost_basis)} symbols")
+        return cost_basis
     
     # ========================================================================
     # Connection Methods
