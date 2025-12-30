@@ -1,21 +1,28 @@
-import os
+from pprint import pprint
 from snaptrade_client import SnapTrade
 
-# Initialize the SnapTrade client
 snaptrade = SnapTrade(
-    consumer_key='24zj0K4yL2PT0Gm55vgQqCYsMGIEtc4QVSUtcrRACIL1KJdjc8',
-    client_id='CONCORDIA-TEST-YMNQY'
+    client_id="KHANJI-EPNQC",
+    consumer_key="ifZlBfjQogVmxLSascFvOMW1UyWW9wEvmZPgxLy5c1HzcbKYdw"
 )
 
-response = snaptrade.authentication.register_snap_trade_user(
-    user_id="yassintest_user_5"
-)
+# Get all SnapTrade users
+response = snaptrade.authentication.list_snap_trade_users()
+users = response.body
 
-# Generate connection URL using the SDK
-response = snaptrade.authentication.login_snap_trade_user(
-    user_id=response.body['userId'],
-    user_secret=response.body['userSecret'],
-    connection_type="trade"
-)
+print(f"Found {len(users)} users\n")
 
-print(f"Connection URL: {response.body['redirectURI']}")
+# Just delete the users (this should cascade delete connections)
+for user_id in users:
+    try:
+        print(f"Deleting user: {user_id}")
+        delete_response = snaptrade.authentication.delete_snap_trade_user(
+            user_id=user_id
+        )
+        print(f"✓ Deleted user: {user_id}\n")
+    except Exception as e:
+        print(f"✗ Error deleting user {user_id}: {e}\n")
+
+print("Deletion complete!")
+print("\nNote: If connections still appear in the dashboard,")
+print("you may need to delete them manually from the SnapTrade dashboard.")

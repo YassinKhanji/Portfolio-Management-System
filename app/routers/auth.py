@@ -4,18 +4,19 @@ Authentication Router
 Handles user authentication with JWT tokens.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Query
+from fastapi.responses import HTMLResponse
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 import uuid
 import jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 import logging
+from passlib.context import CryptContext
 
-from ..models.database import SessionLocal, User, Connection
+from ..models.database import SessionLocal, User, Connection, Position
 from ..services.snaptrade_integration import (
     register_snaptrade_user,
     build_connect_url,
@@ -23,14 +24,20 @@ from ..services.snaptrade_integration import (
     get_symbol_quote,
     place_equity_order,
     SnapTradeClientError,
+    SnapTradeClient,
 )
 from ..services.email_service import get_email_service
 import os
+import httpx
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 from ..core.config import get_settings
+from ..core.currency import convert_to_cad, get_usd_to_cad_rate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["auth"])
 settings = get_settings()
+
+
 BROKER_CONFIG = {
     "kraken": {"account_type": "crypto"},
     "wealthsimple": {"account_type": "equities"},
@@ -96,39 +103,40 @@ def get_db():
 
 
 def ensure_snaptrade_connections(user: User, db: Session) -> dict:
-    """Ensure per-broker SnapTrade identities exist (trade-capable by default).
-
-    Creates/repairs Connection rows for Kraken (crypto) and Wealthsimple (equities), each with its own
-    SnapTrade userId/userSecret. Returns a mapping broker -> Connection.
-    """
+    """Ensure each broker has its own SnapTrade user/secret (no sharing between brokers)."""
 
     changed = False
     now = datetime.now(timezone.utc)
 
-    # Reuse a single SnapTrade user for all broker connections; register once if none exist.
-    existing_conn = (
+    # Preload existing connections for this user
+    existing = (
         db.query(Connection)
-        .filter(Connection.user_id == user.id)
-        .first()
+        .filter(Connection.user_id == user.id, Connection.broker.in_(BROKER_CONFIG.keys()))
+        .all()
     )
-    shared_uid = existing_conn.snaptrade_user_id if existing_conn else None
-    shared_secret = existing_conn.snaptrade_user_secret if existing_conn else None
-    if not shared_uid or not shared_secret:
-        shared_uid, shared_secret = register_snaptrade_user(user.id)
+    by_broker = {c.broker: c for c in existing}
+
+    # Detect duplicates across existing connections so we rotate both sides, not just later ones
+    id_counts: dict[str, int] = {}
+    for c in existing:
+        if c.snaptrade_user_id:
+            id_counts[c.snaptrade_user_id] = id_counts.get(c.snaptrade_user_id, 0) + 1
+
+    used_snaptrade_ids: set[str] = set()
 
     for broker, cfg in BROKER_CONFIG.items():
-        conn = (
-            db.query(Connection)
-            .filter(Connection.user_id == user.id, Connection.broker == broker)
-            .first()
-        )
+        conn = by_broker.get(broker)
+        needs_new_credentials = False
 
         if not conn:
+            # Brand new broker connection: provision a dedicated SnapTrade user for this broker
+            user_id_hint = f"{user.id}-{broker}"
+            uid, secret = register_snaptrade_user(user_id_hint)
             conn = Connection(
                 id=str(uuid.uuid4()),
                 user_id=user.id,
-                snaptrade_user_id=shared_uid,
-                snaptrade_user_secret=shared_secret,
+                snaptrade_user_id=uid,
+                snaptrade_user_secret=secret,
                 account_type=cfg["account_type"],
                 broker=broker,
                 is_connected=False,
@@ -139,15 +147,28 @@ def ensure_snaptrade_connections(user: User, db: Session) -> dict:
             db.add(conn)
             changed = True
         else:
-            # Repair missing credentials if needed
-            if not conn.snaptrade_user_id or not conn.snaptrade_user_secret:
-                if not conn.snaptrade_user_id:
-                    conn.snaptrade_user_id = shared_uid
-                if not conn.snaptrade_user_secret:
-                    conn.snaptrade_user_secret = shared_secret
-                conn.connection_status = conn.connection_status or "pending"
+            # Existing connection: decide if it needs fresh credentials
+            duplicate_seen = conn.snaptrade_user_id in used_snaptrade_ids
+            duplicate_anywhere = id_counts.get(conn.snaptrade_user_id or "", 0) > 1
+            if not conn.snaptrade_user_id or not conn.snaptrade_user_secret or duplicate_seen or duplicate_anywhere:
+                needs_new_credentials = True
+
+            if needs_new_credentials:
+                # Add a short suffix to reduce collision retries when rotating duplicates
+                user_id_hint = f"{user.id}-{broker}-{uuid.uuid4().hex[:6]}"
+                uid, secret = register_snaptrade_user(user_id_hint)
+                conn.snaptrade_user_id = uid
+                conn.snaptrade_user_secret = secret
+                conn.is_connected = False
+                conn.connection_status = "pending"
+                conn.account_id = None  # clear stale account binding when rotating credentials
                 conn.updated_at = now
+                db.add(conn)
                 changed = True
+
+        # Track used SnapTrade IDs to detect duplicates within this user
+        if conn.snaptrade_user_id:
+            used_snaptrade_ids.add(conn.snaptrade_user_id)
 
     if changed:
         user.snaptrade_linked = False
@@ -274,12 +295,54 @@ async def get_snaptrade_connect_url(
     if not connection:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to initialize connection")
 
-    connect_url = build_connect_url(
-        user_id=connection.snaptrade_user_id,
-        user_secret=connection.snaptrade_user_secret,
-        broker=broker,
-        connection_type="trade",
-    )
+    # Build custom redirect URL with our internal connection_id and broker for callback resolution
+    base_redirect = settings.SNAPTRADE_REDIRECT_URI or "http://localhost:8000/api/auth/snaptrade/callback"
+    # Add internal_connection_id and broker to the redirect URL so callback can resolve the connection
+    redirect_params = urlencode({"internal_connection_id": connection.id, "broker": broker})
+    custom_redirect = f"{base_redirect}?{redirect_params}"
+
+    # Build connect URL; if SnapTrade rejects credentials (1083), rotate creds once and retry
+    try:
+        connect_url = build_connect_url(
+            user_id=connection.snaptrade_user_id,
+            user_secret=connection.snaptrade_user_secret,
+            broker=None,  # avoid preselecting unsupported institutions
+            connection_type="trade",
+            custom_redirect=custom_redirect,
+            immediate_redirect=True,
+        )
+    except SnapTradeClientError as exc:
+        msg = str(exc)
+        if "1083" in msg or "Invalid userID" in msg or "userSecret" in msg:
+            # Rotate credentials and retry once
+            uid, secret = register_snaptrade_user(f"{current_user.id}-{broker}-{uuid.uuid4().hex[:6]}")
+            connection.snaptrade_user_id = uid
+            connection.snaptrade_user_secret = secret
+            connection.is_connected = False
+            connection.connection_status = "pending"
+            connection.account_id = None
+            connection.updated_at = datetime.now(timezone.utc)
+            db.add(connection)
+            db.commit()
+            db.refresh(connection)
+
+            # Rebuild custom redirect with updated connection id
+            redirect_params = urlencode({"internal_connection_id": connection.id, "broker": broker})
+            custom_redirect = f"{base_redirect}?{redirect_params}"
+
+            try:
+                connect_url = build_connect_url(
+                    user_id=connection.snaptrade_user_id,
+                    user_secret=connection.snaptrade_user_secret,
+                    broker=None,
+                    connection_type="trade",
+                    custom_redirect=custom_redirect,
+                    immediate_redirect=True,
+                )
+            except SnapTradeClientError as exc2:
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc2))
+        else:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     return {
         "connect_url": connect_url,
@@ -292,11 +355,17 @@ async def get_snaptrade_connect_url(
 
 @router.get("/auth/snaptrade/callback")
 async def snaptrade_callback(
-    broker: str,
+    broker: Optional[str] = Query(default=None),
     code: str = "",  # placeholder for future validation
     userId: str = "",
     userSecret: str = "",
     accountId: str = "",
+    connection_id: str = "",
+    connectionId: str = "",  # SnapTrade may return camelCase
+    internal_connection_id: str = "",  # Our internal connection ID passed via custom redirect
+    status_param: str = "",  # absorb status=SUCCESS from SnapTrade
+    format: str = "",  # optional override for HTML response
+    request: Request = None,
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -305,36 +374,110 @@ async def snaptrade_callback(
     The SnapTrade redirect does not include an Authorization header. We accept
     either a Bearer token (preferred) or the userId/userSecret pair provided by
     SnapTrade and validate it against the stored Connection before linking.
+    
+    Resolution order:
+    1. internal_connection_id (our UUID passed via custom redirect - most reliable)
+    2. SnapTrade credentials (userId + userSecret)
+    3. Authenticated user + broker hint
     """
-
-    broker = broker.lower()
-    if broker not in BROKER_CONFIG:
+    broker = broker.lower() if broker else None
+    if broker and broker not in BROKER_CONFIG:
+        logger.warning(
+            "SnapTrade callback with unsupported broker",
+            extra={"broker": broker, "connection_id": connection_id or connectionId, "userId": userId},
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported broker")
 
-    # Resolve the connection either from the authenticated user or from the query params
+    # SnapTrade's connection_id is NOT our internal ID - store it for reference but don't use for lookup
+    snaptrade_connection_id = connection_id or connectionId
+
     connection: Optional[Connection] = None
-    if current_user:
+
+    # 1. Resolve by our internal connection ID (most reliable - passed via custom redirect)
+    if internal_connection_id:
+        connection = db.query(Connection).filter(Connection.id == internal_connection_id).first()
+        if connection:
+            current_user = db.query(User).filter(User.id == connection.user_id).first()
+            if not broker:
+                broker = connection.broker
+            logger.info(
+                "SnapTrade callback resolved via internal_connection_id",
+                extra={"internal_connection_id": internal_connection_id, "broker": broker},
+            )
+
+    # 2. Fall back to SnapTrade credentials (userId + userSecret)
+    if not connection and userId and userSecret:
+        query = db.query(Connection).filter(
+            Connection.snaptrade_user_id == userId,
+            Connection.snaptrade_user_secret == userSecret,
+        )
+        if broker:
+            query = query.filter(Connection.broker == broker)
+        connection = query.first()
+        if connection:
+            if not broker:
+                broker = connection.broker
+            current_user = db.query(User).filter(User.id == connection.user_id).first()
+            logger.info(
+                "SnapTrade callback resolved via userId/userSecret",
+                extra={"userId": userId, "broker": broker},
+            )
+
+    # 3. Use authenticated user plus broker hint
+    if not connection and current_user and broker:
         connections = ensure_snaptrade_connections(current_user, db)
         connection = connections.get(broker)
-    elif userId and userSecret:
-        connection = (
-            db.query(Connection)
-            .filter(
-                Connection.broker == broker,
-                Connection.snaptrade_user_id == userId,
-                Connection.snaptrade_user_secret == userSecret,
+        if connection:
+            logger.info(
+                "SnapTrade callback resolved via authenticated user + broker",
+                extra={"user_id": current_user.id, "broker": broker},
             )
-            .first()
-        )
-        current_user = connection.user if connection else None
 
     if not connection or not current_user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unable to validate SnapTrade connection")
+        logger.error(
+            "SnapTrade callback could not resolve connection",
+            extra={
+                "broker_param": broker,
+                "internal_connection_id_param": internal_connection_id,
+                "snaptrade_connection_id_param": snaptrade_connection_id,
+                "userId_param": userId,
+                "has_user": bool(current_user),
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "reason": "unable_to_resolve_connection",
+                "broker": broker,
+                "connection_id": snaptrade_connection_id,
+                "internal_connection_id": internal_connection_id,
+            },
+        )
+
+    # Ensure broker matches the connection row (guard against mismatched redirect params)
+    if broker and broker != connection.broker:
+        logger.error(
+            "SnapTrade callback broker mismatch",
+            extra={"broker_param": broker, "connection_broker": connection.broker, "connection_id": connection.id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"reason": "broker_mismatch", "expected": connection.broker, "provided": broker},
+        )
+    broker = connection.broker  # normalize downstream
 
     if userId and userId != connection.snaptrade_user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User mismatch")
+        logger.error(
+            "SnapTrade callback userId mismatch",
+            extra={"connection_id": connection.id, "expected": connection.snaptrade_user_id, "provided": userId},
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"reason": "user_mismatch"})
     if userSecret and userSecret != connection.snaptrade_user_secret:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Secret mismatch")
+        logger.error(
+            "SnapTrade callback secret mismatch",
+            extra={"connection_id": connection.id, "userId": connection.snaptrade_user_id},
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"reason": "secret_mismatch"})
 
     now = datetime.now(timezone.utc)
     connection.is_connected = True
@@ -357,13 +500,49 @@ async def snaptrade_callback(
     db.commit()
     db.refresh(current_user)
 
-    return {
-        "message": f"SnapTrade connection linked for {broker}",
-        "broker": broker,
-        "connection_id": connection.id,
-        "account_id": connection.account_id,
-        "snaptrade_linked": current_user.snaptrade_linked,
-    }
+    logger.info(
+        "SnapTrade callback linked connection",
+        extra={
+            "broker": broker,
+            "connection_id": connection.id,
+            "user_id": current_user.id,
+            "snaptrade_user_id": connection.snaptrade_user_id,
+        },
+    )
+
+    if format and format.lower() == "json":
+        return {
+            "status": "connected",
+            "broker": broker,
+            "connection_id": connection.id,
+            "account_id": connection.account_id,
+            "snaptrade_user_id": connection.snaptrade_user_id,
+        }
+
+    # Always return a visual completion page so the portal shows "Done"
+    html = f"""
+    <html>
+        <body style='margin:0; padding:0; font-family: Helvetica, Arial, sans-serif; background:#f8f9fb;'>
+            <div style='max-width: 520px; margin: 32px auto; background:#fff; border-radius:24px; padding:32px; box-shadow:0 8px 28px rgba(0,0,0,0.12); text-align:center;'>
+                <div style='display:flex; justify-content:center; gap:16px; align-items:center; margin-bottom:24px;'>
+                    <div style='width:56px; height:56px; border-radius:12px; border:1px solid #e6e8ee; display:flex; align-items:center; justify-content:center; font-size:24px;'>↔</div>
+                    <div style='width:56px; height:56px; border-radius:12px; border:1px solid #e6e8ee; display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;'>W</div>
+                </div>
+                <div style='width:140px; height:140px; margin:0 auto 24px; border-radius:50%; background:#e8f4f2; display:flex; align-items:center; justify-content:center;'>
+                    <div style='width:88px; height:88px; border-radius:50%; background:#d1ece6; display:flex; align-items:center; justify-content:center;'>
+                        <div style='width:52px; height:52px; border-radius:14px; background:#0f766e; display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;'>✓</div>
+                    </div>
+                </div>
+                <h2 style='margin:0 0 12px; font-size:28px; color:#111827;'>Connection Complete</h2>
+                <p style='margin:0 0 8px; font-size:16px; color:#374151;'>Your {broker.title()} account has been successfully connected.</p>
+                <p style='margin:0 0 24px; font-size:14px; color:#6b7280;'>You can close this window.</p>
+                <a href='javascript:window.close();' style='display:block; width:100%; background:#111; color:#fff; text-decoration:none; padding:14px 0; border-radius:18px; font-size:17px; font-weight:600;'>Done</a>
+            </div>
+        </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html, status_code=200)
 
 
 @router.get("/auth/snaptrade/accounts/{broker}")
@@ -398,6 +577,250 @@ async def snaptrade_accounts(
             db.commit()
 
     return {"accounts": accounts, "saved_account_id": connection.account_id}
+
+
+@router.get("/auth/snaptrade/status")
+async def snaptrade_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return connection status for all supported brokers for the current user."""
+
+    connections = ensure_snaptrade_connections(current_user, db)
+    items = []
+    for broker, conn in connections.items():
+        items.append(
+            {
+                "broker": broker,
+                "connection_id": conn.id,
+                "is_connected": bool(conn.is_connected),
+                "connection_status": conn.connection_status,
+                "account_id": conn.account_id,
+                "snaptrade_user_id": conn.snaptrade_user_id,
+                "updated_at": conn.updated_at.isoformat() + "Z" if conn.updated_at else None,
+            }
+        )
+
+    return {
+        "snaptrade_linked": bool(current_user.snaptrade_linked),
+        "brokers": items,
+    }
+
+
+@router.get("/auth/snaptrade/holdings")
+async def snaptrade_holdings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return aggregated holdings and account balances from connected SnapTrade brokers."""
+
+    connections = ensure_snaptrade_connections(current_user, db)
+
+    accounts_out = []
+    positions_out = []
+    total_value = 0.0
+    errors: list[str] = []
+
+    for broker, conn in connections.items():
+        if not conn.is_connected or not conn.snaptrade_user_id or not conn.snaptrade_user_secret:
+            continue
+        try:
+            client = SnapTradeClient(conn.snaptrade_user_id, conn.snaptrade_user_secret)
+            accounts = client.get_accounts()
+            logger.info(f"Retrieved {len(accounts)} accounts for {broker}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{broker}: {exc}")
+            logger.error(f"Failed to get accounts for {broker}: {exc}")
+            continue
+
+        for acct in accounts:
+            logger.info(f"Processing account {acct.name} ({acct.id}) - balance={acct.balance}, buying_power={acct.buying_power}")
+            
+            # Default cash from account info (fallback)
+            acct_balance = float(acct.balance or 0)
+            acct_buying_power = float(acct.buying_power or 0)
+            fallback_cash = max(acct_balance, acct_buying_power)
+            logger.info(f"Account fallback cash calculated as max({acct_balance}, {acct_buying_power}) = {fallback_cash}")
+
+            try:
+                holdings_result = client.get_holdings(acct.id)
+                holdings = holdings_result.holdings
+                # Use the actual cash from balances field, not account.balance (which may include securities)
+                acct_cash = holdings_result.total_cash if holdings_result.total_cash > 0 else fallback_cash
+                logger.info(f"Retrieved {len(holdings)} holdings for account {acct.id}, actual cash from balances: {holdings_result.total_cash}, using: {acct_cash}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{broker}/{acct.id}: {exc}")
+                logger.error(f"Failed to get holdings for {broker}/{acct.id}: {exc}")
+                holdings = []
+                acct_cash = fallback_cash
+
+            # Stablecoins and fiat currencies that should be classified as "cash"
+            STABLECOINS = {"USDC", "USDT", "DAI", "BUSD", "TUSD", "USDP", "GUSD", "FRAX", "LUSD", "USDD", "PYUSD"}
+            FIAT_CURRENCIES = {"USD", "CAD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "HKD", "SGD"}
+            CASH_SYMBOLS = STABLECOINS | FIAT_CURRENCIES
+
+            for h in holdings:
+                logger.info(f"Processing holding: symbol={h.symbol}, qty={h.quantity}, price={h.price}, value={h.market_value}")
+                
+                # Ensure symbol is always a string (handle SnapTrade deeply nested objects)
+                # SnapTrade can return: symbol as string, or symbol as dict with 'symbol' key,
+                # or symbol as dict with nested dict {'symbol': {'symbol': 'ATOM', ...}}
+                symbol_val = h.symbol
+                
+                # Handle multiple levels of nesting
+                max_depth = 3  # Safety limit
+                depth = 0
+                while isinstance(symbol_val, dict) and depth < max_depth:
+                    # Try to extract the symbol string from various possible keys
+                    inner = symbol_val.get("symbol") or symbol_val.get("raw_symbol")
+                    if inner is None:
+                        # No more nesting, convert dict to string
+                        symbol_val = str(symbol_val.get("id", symbol_val))
+                        break
+                    symbol_val = inner
+                    depth += 1
+                
+                if not isinstance(symbol_val, str):
+                    symbol_val = str(symbol_val) if symbol_val else ""
+                
+                logger.info(f"Extracted symbol string: '{symbol_val}' from original: {h.symbol}")
+                
+                # Handle name similarly
+                name_val = h.name
+                max_depth = 3
+                depth = 0
+                while isinstance(name_val, dict) and depth < max_depth:
+                    inner = name_val.get("description") or name_val.get("name") or name_val.get("symbol")
+                    if inner is None:
+                        name_val = symbol_val
+                        break
+                    name_val = inner
+                    depth += 1
+                
+                if not isinstance(name_val, str):
+                    name_val = str(name_val) if name_val else symbol_val
+                
+                # Determine asset class: stablecoins/fiat -> cash, otherwise based on broker
+                symbol_upper = symbol_val.upper().replace(".CX", "")  # Handle variants like USD.CX
+                if symbol_upper in CASH_SYMBOLS:
+                    asset_class = "cash"
+                elif broker == "kraken":
+                    asset_class = "crypto"
+                else:
+                    asset_class = "equity"
+                
+                # Convert price and market_value to CAD if in different currency
+                original_currency = h.currency or "CAD"
+                price_cad = convert_to_cad(h.price, original_currency)
+                market_value_cad = convert_to_cad(h.market_value, original_currency)
+                
+                if original_currency.upper() != "CAD":
+                    logger.info(f"Converted {symbol_val}: {h.price} {original_currency} -> {price_cad} CAD, value {h.market_value} -> {market_value_cad} CAD")
+                
+                positions_out.append(
+                    {
+                        "broker": broker,
+                        "account_id": acct.id,
+                        "account_name": acct.name,
+                        "symbol": symbol_val,
+                        "name": name_val,
+                        "quantity": h.quantity,
+                        "price": price_cad,
+                        "market_value": market_value_cad,
+                        "currency": "CAD",  # All values now in CAD
+                        "original_currency": original_currency,  # Keep original for reference
+                        "asset_class": asset_class,
+                    }
+                )
+            # Sum holdings value in CAD
+            holdings_value = sum(
+                convert_to_cad(h.market_value, h.currency or "CAD") 
+                for h in holdings if h.market_value
+            )
+            logger.info(f"Total holdings value for {acct.id} (in CAD): {holdings_value}")
+            
+            # Add cash balance as a position so it shows up in the Cash category
+            cash_value = float(acct_cash)
+            if cash_value > 0:
+                currency_code = acct.currency or "CAD"
+                # Include broker name in the cash display so users know where it's from
+                broker_display = broker.title()  # "kraken" -> "Kraken", "wealthsimple" -> "Wealthsimple"
+                positions_out.append(
+                    {
+                        "broker": broker,
+                        "account_id": acct.id,
+                        "account_name": acct.name,
+                        "symbol": f"{currency_code}",
+                        "name": f"Cash ({currency_code}) - {broker_display}",
+                        "quantity": cash_value,
+                        "price": 1.0,
+                        "market_value": cash_value,
+                        "currency": currency_code,
+                        "asset_class": "cash",
+                    }
+                )
+            
+            acct_total = holdings_value + acct_cash
+            total_value += acct_total
+            logger.info(f"Account {acct.id} total: holdings({holdings_value}) + cash({acct_cash}) = {acct_total}")
+
+            accounts_out.append(
+                {
+                    "broker": broker,
+                    "account_id": acct.id,
+                    "name": acct.name,
+                    "type": acct.type,
+                    "currency": acct.currency,
+                    "balance": acct.balance,
+                    "buying_power": acct.buying_power,
+                    "market_value": holdings_value,
+                    "total_value": acct_total,
+                }
+            )
+    
+    logger.info(f"Total portfolio value: {total_value}")
+    logger.info(f"Total positions returned: {len(positions_out)}")
+
+    # Sync positions to the database for AUM tracking and snapshots
+    try:
+        # Delete existing positions for this user and re-insert fresh data
+        db.query(Position).filter(Position.user_id == current_user.id).delete()
+        
+        for pos in positions_out:
+            position = Position(
+                id=str(uuid.uuid4()),
+                user_id=current_user.id,
+                symbol=pos["symbol"],
+                quantity=float(pos["quantity"]),
+                price=float(pos["price"]),
+                market_value=float(pos["market_value"]),
+                allocation_percentage=0.0,  # Will be calculated on demand
+                target_percentage=0.0,
+                metadata_json={
+                    "broker": pos["broker"],
+                    "account_id": pos["account_id"],
+                    "account_name": pos["account_name"],
+                    "name": pos["name"],
+                    "currency": pos.get("currency", "CAD"),
+                    "original_currency": pos.get("original_currency", "CAD"),
+                    "asset_class": pos["asset_class"],
+                },
+            )
+            db.add(position)
+        
+        db.commit()
+        logger.info(f"Synced {len(positions_out)} positions to database for user {current_user.id}")
+    except Exception as sync_error:
+        db.rollback()
+        logger.error(f"Failed to sync positions to database: {sync_error}")
+        # Don't fail the request, just log the error - holdings are still returned
+
+    return {
+        "total_value": total_value,
+        "accounts": accounts_out,
+        "positions": positions_out,
+        "errors": errors,
+    }
 
 
 @router.get("/auth/snaptrade/symbol/{ticker}")
@@ -762,7 +1185,8 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
                 "email": user.email,
                 "full_name": user.full_name,
                 "role": user.role,
-                "snaptrade_linked": user.snaptrade_linked
+                "snaptrade_linked": user.snaptrade_linked,
+                "onboarding_completed": user.onboarding_completed
             }
         }
         
@@ -792,6 +1216,7 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
         "snaptrade_linked": current_user.snaptrade_linked,
         "risk_profile": current_user.risk_profile,
         "active": current_user.active,
+        "onboarding_completed": current_user.onboarding_completed,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None
     }
 
@@ -806,3 +1231,66 @@ async def logout(current_user: User = Depends(get_current_user)):
     """
     logger.info(f"User logged out: {current_user.email}")
     return {"message": "Successfully logged out"}
+
+
+class UpdateProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+@router.patch("/auth/profile")
+async def update_profile(
+    request: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Update the current user's profile information.
+    
+    Only allows updating full_name and email.
+    """
+    updated = False
+    
+    if request.full_name is not None and request.full_name != current_user.full_name:
+        current_user.full_name = request.full_name
+        updated = True
+        
+    if request.email is not None and request.email != current_user.email:
+        # Check if email is already taken
+        existing = db.query(User).filter(User.email == request.email, User.id != current_user.id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        current_user.email = request.email
+        updated = True
+    
+    if updated:
+        current_user.updated_at = datetime.now(timezone.utc)
+        db.add(current_user)
+        db.commit()
+        db.refresh(current_user)
+        logger.info(f"User profile updated: {current_user.email}")
+    
+    return {
+        "message": "Profile updated successfully" if updated else "No changes made",
+        "user": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "role": current_user.role,
+        }
+    }
+
+
+@router.post("/auth/onboarding/complete")
+async def complete_onboarding(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark the current user's onboarding as complete."""
+    current_user.onboarding_completed = True
+    current_user.updated_at = datetime.now(timezone.utc)
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    logger.info(f"User completed onboarding: {current_user.email}")
+    return {"message": "Onboarding completed", "onboarding_completed": True}

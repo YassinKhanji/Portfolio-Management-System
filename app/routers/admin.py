@@ -9,11 +9,17 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime, timezone
 
-from ..models.database import SessionLocal, User
+import secrets
+
+from ..models.database import SessionLocal, User, Connection, Position
 from ..routers.auth import get_current_user, get_password_hash
 from ..core.config import get_settings
+from ..core.currency import convert_to_cad
+from ..services.snaptrade_integration import get_snaptrade_client, SnapTradeClientError
+import logging
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 
 
 def get_db():
@@ -65,7 +71,8 @@ def create_admin_user(
 ):
     email = (payload.get("email") or "").strip().lower()
     full_name = (payload.get("full_name") or payload.get("name") or "").strip()
-    password = payload.get("password") or "ChangeMe123!"
+    # Generate secure random password if not provided
+    password = payload.get("password") or secrets.token_urlsafe(16)
 
     if not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
@@ -183,6 +190,40 @@ def suspend_user(
     if user.email == getattr(settings, "ADMIN_EMAIL", ""):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Owner cannot be suspended")
 
+    # Delete SnapTrade users first to stop billing; fail the suspend if upstream deletion fails
+    connections = db.query(Connection).filter(Connection.user_id == user.id).all()
+    snaptrade_user_ids: set[str] = set()
+    for c in connections:
+        if c.snaptrade_user_id:
+            snaptrade_user_ids.add(c.snaptrade_user_id)
+
+    if snaptrade_user_ids:
+        try:
+            snaptrade = get_snaptrade_client()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"SnapTrade client init failed during suspend: {exc}",
+            )
+
+        failures: list[str] = []
+        for sid in snaptrade_user_ids:
+            try:
+                snaptrade.authentication.delete_snap_trade_user(user_id=sid)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{sid}: {exc}")
+
+        if failures:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to delete SnapTrade user(s): {'; '.join(failures)}",
+            )
+
+    # Remove local connections
+    for conn in connections:
+        db.delete(conn)
+
+    # Mark user inactive
     user.active = False
     user.updated_at = datetime.now(timezone.utc)
     db.add(user)
@@ -224,3 +265,83 @@ def unsuspend_user(
         "active": user.active,
         "updated_at": user.updated_at.isoformat() + "Z" if user.updated_at else None,
     }
+
+
+@router.delete("/users/{user_id}")
+def delete_user(
+    user_id: str,
+    _: User = Depends(require_owner),
+    db: Session = Depends(get_db)
+):
+    """Delete a user and clean up SnapTrade identities/connections."""
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Collect unique SnapTrade user IDs for this user to delete upstream
+    connections = db.query(Connection).filter(Connection.user_id == user.id).all()
+    snaptrade_user_ids: set[str] = set()
+    for c in connections:
+        if c.snaptrade_user_id:
+            snaptrade_user_ids.add(c.snaptrade_user_id)
+
+    if snaptrade_user_ids:
+        try:
+            snaptrade = get_snaptrade_client()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"SnapTrade client init failed during user delete: {exc}",
+            )
+
+        failures: list[str] = []
+        for sid in snaptrade_user_ids:
+            try:
+                snaptrade.authentication.delete_snap_trade_user(user_id=sid)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{sid}: {exc}")
+
+        if failures:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to delete SnapTrade user(s): {'; '.join(failures)}",
+            )
+
+    # Delete local connections then user
+    for conn in connections:
+        db.delete(conn)
+    db.delete(user)
+    db.commit()
+
+    return {"message": "User deleted", "id": user_id}
+
+
+@router.post("/sync-holdings")
+def sync_all_holdings_now(
+    _: User = Depends(require_owner),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually trigger a holdings sync for all users with SnapTrade connections.
+    This fetches live holdings from SnapTrade and updates the Position table.
+    """
+    from app.jobs.holdings_sync import sync_all_holdings_sync
+    
+    try:
+        result = sync_all_holdings_sync()
+        
+        return {
+            "message": "Holdings sync complete",
+            "synced_users": result.get('users_processed', 0),
+            "total_positions": result.get('positions_synced', 0),
+            "total_aum": round(result.get('total_aum', 0), 2),
+            "errors": result.get('errors', 0)
+        }
+        
+    except Exception as e:
+        logger.error(f"Holdings sync failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Holdings sync failed: {str(e)}"
+        )

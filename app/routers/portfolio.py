@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 
 import yfinance as yf
+import pandas as pd
 from pydantic import BaseModel
 
 from ..models.database import (
@@ -30,6 +31,7 @@ from ..models.database import (
 )
 from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
+from ..services.snaptrade_integration import get_snaptrade_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -60,41 +62,88 @@ _benchmark_intraday_cache: Dict[str, object] = {
     "data": [],  # list of {timestamp: datetime, close: float}
 }
 
+# List of S&P 500 tickers to try (fallbacks if main one fails)
+SP500_TICKERS = ["^GSPC", "SPY", "VOO", "IVV"]
+
 
 def _fetch_sp500_history() -> List[dict]:
-    """Fetch last 5y of SP500 (\^GSPC) daily closes, cached for reuse."""
-    try:
-        df = yf.download("^GSPC", period="5y", interval="1d", progress=False)
-        if df is None or df.empty:
-            logger.warning("yfinance returned empty data for ^GSPC")
-            return []
+    """Fetch last 5y of SP500 daily closes, cached for reuse. Tries multiple tickers."""
+    for ticker in SP500_TICKERS:
+        try:
+            logger.info(f"Attempting to fetch benchmark data from {ticker}")
+            df = yf.download(ticker, period="5y", interval="1d", progress=False, timeout=30)
+            if df is None or df.empty:
+                logger.warning(f"yfinance returned empty data for {ticker}, trying next...")
+                continue
 
-        df = df.reset_index()[["Date", "Close"]]
-        records = []
-        for _, row in df.iterrows():
-            day = row["Date"].date() if hasattr(row["Date"], "date") else row["Date"]
-            records.append({"date": day, "close": float(row["Close"])})
-        return records
-    except Exception as exc:  # pragma: no cover - network dependency
-        logger.error(f"Failed to fetch ^GSPC from yfinance: {exc}")
-        return []
+            # Handle both single and multi-index columns (yfinance can return either)
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.droplevel(1, axis=1)
+            
+            df = df.reset_index()
+            
+            # Find the date and close columns (case-insensitive)
+            date_col = next((c for c in df.columns if c.lower() == 'date'), None)
+            close_col = next((c for c in df.columns if c.lower() == 'close'), None)
+            
+            if not date_col or not close_col:
+                logger.warning(f"Could not find Date/Close columns in {ticker} data: {df.columns.tolist()}")
+                continue
+            
+            records = []
+            for _, row in df.iterrows():
+                day = row[date_col].date() if hasattr(row[date_col], "date") else row[date_col]
+                close_val = row[close_col]
+                # Handle numpy arrays or single values
+                if hasattr(close_val, 'item'):
+                    close_val = close_val.item()
+                records.append({"date": day, "close": float(close_val)})
+            
+            if records:
+                logger.info(f"Successfully fetched {len(records)} benchmark data points from {ticker}")
+                return records
+                
+        except Exception as exc:
+            logger.error(f"Failed to fetch {ticker} from yfinance: {exc}")
+            continue
+    
+    logger.error("All benchmark tickers failed to return data")
+    return []
 
 
 def _fetch_sp500_intraday(days: int = 7) -> List[dict]:
     """Fetch intraday S&P 500 (hourly) closes for the last N days."""
-    try:
-        df = yf.download("^GSPC", period=f"{days}d", interval="60m", progress=False)
-        if df is None or df.empty:
-            logger.warning("yfinance returned empty intraday data for ^GSPC")
-            return []
-        records = []
-        for idx, row in df.iterrows():
-            ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
-            records.append({"timestamp": ts, "close": float(row.get("Close"))})
-        return records
-    except Exception as exc:  # pragma: no cover - network dependency
-        logger.error(f"Failed to fetch intraday ^GSPC from yfinance: {exc}")
-        return []
+    for ticker in SP500_TICKERS:
+        try:
+            df = yf.download(ticker, period=f"{days}d", interval="60m", progress=False, timeout=30)
+            if df is None or df.empty:
+                logger.warning(f"yfinance returned empty intraday data for {ticker}")
+                continue
+            
+            # Handle both single and multi-index columns
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.droplevel(1, axis=1)
+            
+            close_col = next((c for c in df.columns if c.lower() == 'close'), None)
+            if not close_col:
+                continue
+                
+            records = []
+            for idx, row in df.iterrows():
+                ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
+                close_val = row[close_col]
+                if hasattr(close_val, 'item'):
+                    close_val = close_val.item()
+                records.append({"timestamp": ts, "close": float(close_val)})
+            
+            if records:
+                return records
+                
+        except Exception as exc:
+            logger.error(f"Failed to fetch intraday {ticker} from yfinance: {exc}")
+            continue
+    
+    return []
 
 
 def _get_sp500_history() -> List[dict]:
@@ -471,16 +520,47 @@ async def get_portfolio_health_metrics(
 
 @router.patch("/clients/{user_id}")
 async def update_client(user_id: str, payload: dict, db: Session = Depends(get_db)):
-    """Update basic client fields (full_name, email, risk_profile, active)."""
+    """Update basic client fields (full_name, email, risk_profile, active).
+    
+    When setting active=False (suspension), also deletes SnapTrade users to stop billing.
+    """
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="Client not found")
 
+        # Check if this is a suspension (active being set to False)
+        is_suspension = payload.get("active") is False and user.active is not False
+
         allowed_fields = {"full_name", "email", "risk_profile", "active"}
         for key, value in payload.items():
             if key in allowed_fields:
                 setattr(user, key, value)
+
+        # If suspending, delete SnapTrade users to stop billing
+        if is_suspension:
+            connections = db.query(Connection).filter(Connection.user_id == user_id).all()
+            snaptrade_user_ids: set[str] = set()
+            for conn in connections:
+                if conn.snaptrade_user_id:
+                    snaptrade_user_ids.add(conn.snaptrade_user_id)
+
+            if snaptrade_user_ids:
+                try:
+                    snaptrade = get_snaptrade_client()
+                    for sid in snaptrade_user_ids:
+                        try:
+                            snaptrade.authentication.delete_snap_trade_user(user_id=sid)
+                            logger.info(f"Deleted SnapTrade user {sid} during suspension of client {user_id}")
+                        except Exception as exc:
+                            logger.warning(f"Failed to delete SnapTrade user {sid}: {exc}")
+                except Exception as exc:
+                    logger.warning(f"SnapTrade client init failed during suspension: {exc}")
+
+            # Delete local connections and reset SnapTrade link status
+            for conn in connections:
+                db.delete(conn)
+            user.snaptrade_linked = False
 
         user.updated_at = datetime.now(timezone.utc)
         db.add(user)
@@ -505,11 +585,31 @@ async def update_client(user_id: str, payload: dict, db: Session = Depends(get_d
 
 @router.delete("/clients/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_client(user_id: str, db: Session = Depends(get_db)):
-    """Delete a client and related records."""
+    """Delete a client and related records, including SnapTrade users."""
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="Client not found")
+
+        # Delete SnapTrade users first to stop billing
+        connections = db.query(Connection).filter(Connection.user_id == user_id).all()
+        snaptrade_user_ids: set[str] = set()
+        for conn in connections:
+            if conn.snaptrade_user_id:
+                snaptrade_user_ids.add(conn.snaptrade_user_id)
+
+        if snaptrade_user_ids:
+            try:
+                snaptrade = get_snaptrade_client()
+                for sid in snaptrade_user_ids:
+                    try:
+                        snaptrade.authentication.delete_snap_trade_user(user_id=sid)
+                        logger.info(f"Deleted SnapTrade user {sid} for client {user_id}")
+                    except Exception as exc:
+                        logger.warning(f"Failed to delete SnapTrade user {sid}: {exc}")
+                        # Continue with deletion even if SnapTrade cleanup fails
+            except Exception as exc:
+                logger.warning(f"SnapTrade client init failed during client delete: {exc}")
 
         # Clean up related records (best-effort), including SnapTrade access and notifications
         db.query(Position).filter(Position.user_id == user_id).delete()
@@ -549,6 +649,80 @@ def _normalize_risk(risk: Optional[str]) -> Optional[str]:
     if lower in {"low", "conservative"}:
         return "Conservative"
     return risk.title()
+
+
+@router.get("/balance-history")
+async def get_balance_history(
+    category: str = "all",
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Get historical balance data for the current user's account.
+    
+    Returns balance history from account creation to now, suitable for line charts.
+    
+    Args:
+        category: Filter by asset category - 'all', 'crypto', 'equity', or 'cash'
+    
+    Returns:
+        List of {timestamp, value} points for chart rendering
+    """
+    try:
+        # Get current user from token
+        user = await get_current_user(token, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Fetch all snapshots for this user since account creation
+        snapshots = (
+            db.query(PortfolioSnapshot)
+            .filter(PortfolioSnapshot.user_id == user.id)
+            .order_by(PortfolioSnapshot.recorded_at.asc())
+            .all()
+        )
+        
+        # Build response based on category
+        category_lower = category.lower().strip()
+        history = []
+        
+        for snap in snapshots:
+            if category_lower == "all":
+                value = float(snap.total_value or 0.0)
+            elif category_lower == "crypto":
+                value = float(snap.crypto_value or 0.0)
+            elif category_lower == "equity" or category_lower == "equities":
+                value = float(snap.stocks_value or 0.0)
+            elif category_lower == "cash":
+                value = float(snap.cash_value or 0.0)
+            else:
+                value = float(snap.total_value or 0.0)
+            
+            history.append({
+                "timestamp": snap.recorded_at.isoformat() if snap.recorded_at else None,
+                "value": round(value, 2),
+            })
+        
+        # If no snapshots, return empty with account creation date
+        if not history and user.created_at:
+            history.append({
+                "timestamp": user.created_at.isoformat(),
+                "value": 0.0,
+            })
+        
+        return {
+            "category": category_lower,
+            "user_id": user.id,
+            "account_created": user.created_at.isoformat() if user.created_at else None,
+            "data_points": len(history),
+            "history": history,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch balance history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/portfolio/metrics")

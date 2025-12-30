@@ -7,7 +7,7 @@ Based on SYSTEM_SPECIFICATIONS.md
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest
+from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest, holdings_sync
 import asyncio
 from app.jobs.utils import is_emergency_stop_active
 from app.core.config import get_settings
@@ -74,7 +74,21 @@ def add_jobs():
     logger.info("[OK] Added job: rebalance_portfolios (Friday 08:00 EST)")
     
     # ========================================================================
-    # 3. PORTFOLIO SNAPSHOTS: Every 4 hours
+    # 3. HOLDINGS SYNC: Every hour (runs at :50 past the hour)
+    # Syncs SnapTrade holdings to the Position table for AUM tracking
+    # This is critical for accurate portfolio values and performance tracking
+    # ========================================================================
+    scheduler.add_job(
+        holdings_sync.sync_all_holdings,
+        CronTrigger(minute=50),  # Run at :50 past every hour
+        id="sync_holdings",
+        name="Sync SnapTrade Holdings",
+        replace_existing=True
+    )
+    logger.info("[OK] Added job: sync_holdings (every hour at :50)")
+    
+    # ========================================================================
+    # 4. PORTFOLIO SNAPSHOTS: Every 4 hours
     # Used for performance charts and historical tracking
     # ========================================================================
     scheduler.add_job(
@@ -87,7 +101,7 @@ def add_jobs():
     logger.info("[OK] Added job: portfolio_snapshot (every 4 hours)")
     
     # ========================================================================
-    # 4. SYSTEM HEALTH CHECK: Every hour
+    # 5. SYSTEM HEALTH CHECK: Every hour
     # ========================================================================
     scheduler.add_job(
         health_check.check_system_health,

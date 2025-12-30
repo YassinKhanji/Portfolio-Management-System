@@ -22,6 +22,7 @@ from sqlalchemy import func, text
 
 from ..models.database import SessionLocal, User, Connection, Position, Log, SystemStatus as SystemStatusModel
 from ..jobs.scheduler import start_scheduler, stop_jobs_for_emergency
+from ..core.config import get_settings
 
 router = APIRouter(prefix="/api", tags=["system"])
 logger = logging.getLogger(__name__)
@@ -148,7 +149,16 @@ async def get_system_health(db: Session = Depends(get_db)):
             try:
                 total_users = db.query(User).count()
                 active_users = db.query(User).filter(User.last_login.isnot(None)).count()
-                total_aum = db.query(func.coalesce(func.sum(Position.market_value), 0)).scalar() or 0.0
+                # Calculate AUM excluding the owner's positions
+                settings = get_settings()
+                owner_email = getattr(settings, "ADMIN_EMAIL", "")
+                owner = db.query(User).filter(User.email == owner_email).first()
+                if owner:
+                    total_aum = db.query(func.coalesce(func.sum(Position.market_value), 0)).filter(
+                        Position.user_id != owner.id
+                    ).scalar() or 0.0
+                else:
+                    total_aum = db.query(func.coalesce(func.sum(Position.market_value), 0)).scalar() or 0.0
             except Exception as query_error:
                 logger.warning(f"Health metrics query failed: {query_error}")
                 database_connected = False

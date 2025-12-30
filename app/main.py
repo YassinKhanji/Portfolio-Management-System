@@ -43,6 +43,16 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Scheduler failed to start: {se}")
     else:
         logger.info("Scheduler disabled; skipping start")
+    
+    # Trigger initial holdings sync on startup
+    try:
+        from app.jobs.holdings_sync import sync_all_holdings_sync
+        logger.info("Running initial holdings sync...")
+        result = sync_all_holdings_sync()
+        logger.info(f"Initial sync complete: {result.get('users_processed', 0)} users, ${result.get('total_aum', 0):,.2f} AUM")
+    except Exception as sync_err:
+        logger.warning(f"Initial holdings sync failed: {sync_err}")
+    
     logger.info("[OK] System initialized and ready")
     
     yield

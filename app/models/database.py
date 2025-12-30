@@ -69,6 +69,9 @@ class User(Base):
     snaptrade_user_id = Column(String, nullable=True)
     snaptrade_linked = Column(Boolean, default=False)
     
+    # Onboarding
+    onboarding_completed = Column(Boolean, default=False)
+    
     # Risk Profile (Conservative, Balanced, Aggressive)
     risk_profile = Column(String, default="Balanced")
     rebalance_frequency = Column(String, default="weekly")
