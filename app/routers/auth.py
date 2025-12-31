@@ -12,8 +12,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 import uuid
 import jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field, field_validator
 import logging
+import re
 from passlib.context import CryptContext
 import html
 
@@ -39,6 +40,18 @@ from ..core.currency import convert_to_cad, get_usd_to_cad_rate
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["auth"])
 settings = get_settings()
+
+
+def safe_error_message(exc: Exception) -> str:
+    """
+    Return a safe error message that doesn't leak sensitive information.
+    In DEBUG mode, returns full error; in production, returns generic message.
+    """
+    if settings.DEBUG:
+        return str(exc)
+    # Log full error for debugging, return safe message to client
+    logger.error(f"External service error: {exc}", exc_info=True)
+    return "External service temporarily unavailable"
 
 
 BROKER_CONFIG = {
@@ -75,27 +88,47 @@ class Token(BaseModel):
 
 
 class UserRegister(BaseModel):
-    email: str
-    password: str
-    full_name: str
+    email: EmailStr = Field(..., description="Valid email address")
+    password: str = Field(..., min_length=8, max_length=128, description="Password (8-128 chars)")
+    full_name: str = Field(..., min_length=1, max_length=100, description="Full name")
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v):
+        """Ensure password meets security requirements."""
+        if len(v) < 8:
+            raise ValueError('Password must be at least 8 characters')
+        if not re.search(r'[A-Z]', v):
+            raise ValueError('Password must contain at least one uppercase letter')
+        if not re.search(r'[a-z]', v):
+            raise ValueError('Password must contain at least one lowercase letter')
+        if not re.search(r'\d', v):
+            raise ValueError('Password must contain at least one digit')
+        return v
+    
+    @field_validator('full_name')
+    @classmethod
+    def sanitize_full_name(cls, v):
+        """Sanitize name to prevent XSS."""
+        return html.escape(v.strip())
 
 
 class UserLogin(BaseModel):
-    email: str
-    password: str
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class OrderRequest(BaseModel):
-    broker: str
-    ticker: Optional[str] = None
-    universal_symbol_id: Optional[str] = None
-    account_id: Optional[str] = None
-    notional: Optional[float] = None
-    units: Optional[float] = None
-    side: str
-    order_type: str = "market"
-    time_in_force: str = "DAY"
-    limit_price: Optional[float] = None
+    broker: str = Field(..., pattern=r'^(kraken|wealthsimple)$', description="Supported broker")
+    ticker: Optional[str] = Field(None, max_length=20, pattern=r'^[A-Z0-9\.\-]+$')
+    universal_symbol_id: Optional[str] = Field(None, max_length=100)
+    account_id: Optional[str] = Field(None, max_length=100)
+    notional: Optional[float] = Field(None, gt=0, le=1_000_000, description="Trade value in dollars")
+    units: Optional[float] = Field(None, gt=0, le=100_000, description="Number of units")
+    side: str = Field(..., pattern=r'^(BUY|SELL|buy|sell)$')
+    order_type: str = Field("market", pattern=r'^(market|limit|MARKET|LIMIT)$')
+    time_in_force: str = Field("DAY", pattern=r'^(DAY|GTC|IOC|FOK)$')
+    limit_price: Optional[float] = Field(None, gt=0)
 
 
 def get_db():
@@ -345,9 +378,9 @@ async def get_snaptrade_connect_url(
                     immediate_redirect=True,
                 )
             except SnapTradeClientError as exc2:
-                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc2))
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc2))
         else:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc))
 
     return {
         "connect_url": connect_url,
@@ -578,7 +611,7 @@ async def snaptrade_accounts(
     try:
         accounts = list_accounts(connection.snaptrade_user_id, connection.snaptrade_user_secret)
     except SnapTradeClientError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
 
     # Persist first account id if not already stored
     if accounts and not connection.account_id:
@@ -923,7 +956,7 @@ async def snaptrade_symbol_lookup(
     try:
         quote = get_symbol_quote(ticker, account, connection.snaptrade_user_id, connection.snaptrade_user_secret)
     except SnapTradeClientError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
 
     universal_symbol_id = None
     if isinstance(quote, dict):
@@ -991,7 +1024,7 @@ async def snaptrade_place_order(
                 or quote.get("symbol_id")
             )
         except SnapTradeClientError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
 
     if not universal_symbol_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Universal symbol id not resolved")
@@ -1003,7 +1036,7 @@ async def snaptrade_place_order(
                 order.ticker, account_id, connection.snaptrade_user_id, connection.snaptrade_user_secret
             )
         except SnapTradeClientError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
         price = _extract_price(quote)
         if not order.notional:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Notional or units required")
@@ -1055,7 +1088,7 @@ async def snaptrade_place_order(
                     error=str(exc),
                     db_session=db,
                 )
-                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
         else:
             # Audit failed trade
             audit_trade(
@@ -1070,7 +1103,7 @@ async def snaptrade_place_order(
                 error=str(exc),
                 db_session=db,
             )
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         # Audit failed trade
         audit_trade(
@@ -1085,7 +1118,7 @@ async def snaptrade_place_order(
             error=str(exc),
             db_session=db,
         )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=safe_error_message(exc)) from exc
 
     # Audit successful trade
     audit_trade(
