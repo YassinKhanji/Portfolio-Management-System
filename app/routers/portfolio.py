@@ -981,9 +981,22 @@ async def get_portfolio_metrics(
         positions = db.query(Position).filter(Position.user_id.in_(user_ids)).all()
         total_value = sum(p.market_value for p in positions if p.market_value)
         
-        # Calculate 24h change (simplified - would need price history)
-        # TODO: Implement proper 24h change calculation with historical prices
-        change_24h = 2.34  # Placeholder
+        # Calculate total cost basis and P&L from positions
+        total_cost_basis = 0.0
+        total_current_value = 0.0
+        for p in positions:
+            if p.cost_basis and p.cost_basis > 0 and p.quantity:
+                total_cost_basis += p.cost_basis * p.quantity
+            if p.market_value:
+                total_current_value += p.market_value
+        
+        # Calculate actual P&L (change) based on cost basis
+        if total_cost_basis > 0:
+            change_24h = total_current_value - total_cost_basis
+            change_24h_percent = ((total_current_value - total_cost_basis) / total_cost_basis) * 100
+        else:
+            change_24h = 0.0
+            change_24h_percent = 0.0
         
         # Get recent transaction count
         yesterday = datetime.now(timezone.utc) - timedelta(days=1)
@@ -995,7 +1008,7 @@ async def get_portfolio_metrics(
         return {
             "total_value": total_value,
             "change_24h": change_24h,
-            "change_24h_percent": (change_24h / total_value * 100) if total_value > 0 else 0,
+            "change_24h_percent": change_24h_percent,
             "total_positions": total_positions,
             "active_users": total_users,
             "transactions_24h": transactions_24h,
