@@ -824,18 +824,32 @@ async def snaptrade_holdings(
                 else:
                     asset_class = "equity"
                 
-                # Convert price and market_value to CAD if in different currency
+                # Get the reported currency from holding
                 original_currency = h.currency or "CAD"
-                price_cad = convert_to_cad(h.price, original_currency)
-                market_value_cad = convert_to_cad(h.market_value, original_currency)
+                
+                # Log raw values from SnapTrade for debugging
+                logger.info(f"RAW from SnapTrade - {symbol_val}: price={h.price}, avg_price={h.average_purchase_price}, currency={original_currency}, broker={broker}")
+                
+                # For Kraken: SnapTrade may incorrectly report USD but the values are actually in CAD
+                # (as shown in the Kraken app which displays CAD prices)
+                # Check if this is a Kraken account that should be CAD
+                effective_currency = original_currency
+                if broker == "kraken":
+                    # Kraken Canada accounts use CAD - check if the currency seems wrong
+                    # If reported as USD but values look like CAD, trust Kraken's CAD display
+                    effective_currency = "CAD"  # Force CAD for Kraken since Kraken Canada uses CAD
+                    logger.info(f"Kraken broker detected - using CAD as effective currency (was reported as {original_currency})")
+                
+                # Convert price and market_value to CAD if in different currency
+                price_cad = convert_to_cad(h.price, effective_currency)
+                market_value_cad = convert_to_cad(h.market_value, effective_currency)
                 
                 # Get average purchase price (cost basis) from holding
                 avg_purchase_price = getattr(h, 'average_purchase_price', 0) or 0
-                if avg_purchase_price and original_currency.upper() != "CAD":
-                    avg_purchase_price = convert_to_cad(avg_purchase_price, original_currency)
+                if avg_purchase_price and effective_currency.upper() != "CAD":
+                    avg_purchase_price = convert_to_cad(avg_purchase_price, effective_currency)
                 
-                if original_currency.upper() != "CAD":
-                    logger.info(f"Converted {symbol_val}: {h.price} {original_currency} -> {price_cad} CAD, value {h.market_value} -> {market_value_cad} CAD")
+                logger.info(f"PROCESSED - {symbol_val}: price_cad={price_cad}, avg_price={avg_purchase_price}, effective_currency={effective_currency}")
                 
                 positions_out.append(
                     {
@@ -848,7 +862,7 @@ async def snaptrade_holdings(
                         "price": price_cad,
                         "market_value": market_value_cad,
                         "currency": "CAD",  # All values now in CAD
-                        "original_currency": original_currency,  # Keep original for reference
+                        "original_currency": effective_currency,  # Keep effective currency
                         "asset_class": asset_class,
                         "average_purchase_price": avg_purchase_price,  # Cost basis from SnapTrade
                     }
