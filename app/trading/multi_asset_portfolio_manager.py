@@ -114,7 +114,7 @@ class MultiAssetPortfolioManager:
         self.max_crypto_allocation = 0.30  # Max 30% in crypto
         self.min_cash_allocation = 0.05  # Min 5% cash
         
-        logger.info(f"Initialized MultiAssetPortfolioManager with ${initial_portfolio_value:,.0f}")
+        logger.info("Initialized MultiAssetPortfolioManager")
     
     # =========================================================================
     # REGIME SIGNAL INTEGRATION
@@ -122,12 +122,12 @@ class MultiAssetPortfolioManager:
     
     def update_crypto_regime(self, regime_signal: RegimeSignal) -> None:
         """Update regime signal from crypto detector"""
-        logger.info(f"Updated crypto regime: {regime_signal.regime} (confidence: {regime_signal.confidence:.0%})")
+        logger.info("Updated crypto regime")
         self.crypto_regime = regime_signal
     
     def update_traditional_regime(self, regime_signal: RegimeSignal) -> None:
         """Update regime signal from traditional assets detector"""
-        logger.info(f"Updated traditional regime: {regime_signal.regime} (confidence: {regime_signal.confidence:.0%})")
+        logger.info("Updated traditional regime")
         self.traditional_regime = regime_signal
     
     def get_aggregate_regime(self) -> str:
@@ -188,7 +188,7 @@ class MultiAssetPortfolioManager:
             return None
         
         aggregate_regime = self.get_aggregate_regime()
-        logger.info(f"Computing allocation for regime: {aggregate_regime}")
+        logger.info("Computing allocation")
         
         # Get base allocation for aggregate regime
         base_allocation = self._get_base_allocation(aggregate_regime)
@@ -209,7 +209,7 @@ class MultiAssetPortfolioManager:
         cash_weight = max(cash_weight, self.min_cash_allocation)
         traditional_weight = 1.0 - crypto_weight - cash_weight
         
-        logger.info(f"Target allocation: Crypto={crypto_weight:.1%}, Traditional={traditional_weight:.1%}, Cash={cash_weight:.1%}")
+        logger.info("Target allocation computed")
         
         # Distribute within crypto
         crypto_allocations = self._allocate_crypto_assets(
@@ -400,13 +400,13 @@ class MultiAssetPortfolioManager:
         if self.last_rebalance_date:
             days_since = (datetime.now() - self.last_rebalance_date).days
             if days_since < self.rebalance_frequency_days:
-                logger.debug(f"Skipping rebalance: {days_since} days since last rebalance")
+                logger.debug("Skipping rebalance: too soon since last rebalance")
                 return False
         
         # Check if any allocation drifted beyond threshold
         for allocation in self.portfolio_allocation.allocations:
             if allocation.rebalance_needed:
-                logger.info(f"Rebalancing needed: {allocation.ticker} drifted from target")
+                logger.info("Rebalancing needed")
                 return True
         
         return False
@@ -504,7 +504,7 @@ class MultiAssetPortfolioManager:
         """Update current position value for an asset"""
         self.asset_positions[ticker] = value
         self.current_value = sum(self.asset_positions.values())
-        logger.debug(f"Updated {ticker} position to ${value:,.2f} | Portfolio: ${self.current_value:,.2f}")
+        logger.debug("Updated position value")
     
     def record_rebalance(self) -> None:
         """Record that a rebalance was performed"""

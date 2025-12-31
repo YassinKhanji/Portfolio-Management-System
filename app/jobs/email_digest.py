@@ -102,13 +102,13 @@ async def send_weekly_digest():
                     db.commit()
                 
             except Exception as e:
-                logger.error(f"Failed to send digest to user {user.email}: {str(e)}", exc_info=True)
+                logger.error("Failed to send digest", exc_info=True)
                 error_count += 1
         
         logger.info(f"[OK] Weekly email digests sent: {sent_count} success, {error_count} errors")
         
     except Exception as e:
-        logger.error(f"Failed to send weekly digests: {str(e)}", exc_info=True)
+        logger.error("Failed to send weekly digests", exc_info=True)
     finally:
         db.close()
 
@@ -182,9 +182,9 @@ def _send_email(to_email: str, subject: str, html_content: str) -> bool:
             server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
             server.send_message(msg)
         
-        logger.info(f"[OK] Email sent to {to_email}")
+        logger.info("[OK] Email sent")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to send email to {to_email}: {str(e)}", exc_info=True)
+        logger.error("Failed to send email", exc_info=True)
         return False

@@ -149,8 +149,6 @@ class SnapTradeExecutor:
         self.market_data: Dict[str, Dict] = {}
         
         logger.info("Initialized SnapTradeExecutor")
-        logger.info(f"  Kraken Account: {kraken_account_id}")
-        logger.info(f"  WealthSimple Account: {wealthsimple_account_id}")
     
     # =========================================================================
     # ACCOUNT MANAGEMENT
@@ -166,7 +164,7 @@ class SnapTradeExecutor:
         Returns:
             Account details (balance, currency, connection status, etc.)
         """
-        logger.info(f"Fetching account info for {account_id}")
+        logger.info("Fetching account info")
         
         # In production: Call SnapTrade API - GET /accounts/{account_id}
         
@@ -195,7 +193,7 @@ class SnapTradeExecutor:
         Returns:
             Dictionary of {ticker: quantity}
         """
-        logger.info(f"Fetching portfolio for {account_id}")
+        logger.info("Fetching portfolio")
         
         # In production: Call SnapTrade API - GET /accounts/{account_id}/positions
         
@@ -266,7 +264,7 @@ class SnapTradeExecutor:
             reason=reason,
         )
         
-        logger.info(f"Placing {side} order: {quantity} {ticker} @ {price or 'MARKET'} | {reason}")
+        logger.info("Placing order")
         
         try:
             # Submit to SnapTrade API
@@ -275,12 +273,12 @@ class SnapTradeExecutor:
             # Track order
             self.orders[order_id] = order
             
-            logger.info(f"Order submitted: {order_id} (SnapTrade: {order.snaptrade_order_id})")
+            logger.info("Order submitted")
             
             return order
         
         except Exception as e:
-            logger.error(f"Failed to place order: {e}")
+            logger.error("Failed to place order", exc_info=True)
             order.status = OrderStatus.REJECTED
             return order
     
@@ -305,7 +303,7 @@ class SnapTradeExecutor:
         order.submitted_at = datetime.now()
         order.snaptrade_order_id = str(uuid.uuid4())  # Would come from API
         
-        logger.debug(f"Order submitted to SnapTrade: {order.snaptrade_order_id}")
+        logger.debug("Order submitted to SnapTrade")
         
         return order
     
@@ -327,7 +325,7 @@ class SnapTradeExecutor:
         """
         
         execution_id = str(uuid.uuid4())
-        logger.info(f"Executing batch {execution_id} with {len(orders)} orders")
+        logger.info("Executing batch")
         
         execution_report = ExecutionReport(
             execution_id=execution_id,
@@ -344,7 +342,7 @@ class SnapTradeExecutor:
         
         # Execute crypto orders (Kraken)
         if crypto_orders:
-            logger.info(f"Submitting {len(crypto_orders)} crypto orders to Kraken via SnapTrade")
+            logger.info("Submitting crypto orders")
             for order in crypto_orders:
                 try:
                     submitted_order = self.place_order(
@@ -357,13 +355,13 @@ class SnapTradeExecutor:
                     )
                     execution_report.orders_submitted += 1
                 except Exception as e:
-                    logger.error(f"Failed to submit crypto order {order.ticker}: {e}")
-                    execution_report.errors.append(f"Crypto order {order.ticker}: {e}")
+                    logger.error("Failed to submit crypto order", exc_info=True)
+                    execution_report.errors.append("Crypto order failed")
                     execution_report.success = False
         
         # Execute traditional orders (WealthSimple)
         if traditional_orders:
-            logger.info(f"Submitting {len(traditional_orders)} traditional orders to WealthSimple via SnapTrade")
+            logger.info("Submitting traditional orders")
             for order in traditional_orders:
                 try:
                     submitted_order = self.place_order(
@@ -376,14 +374,14 @@ class SnapTradeExecutor:
                     )
                     execution_report.orders_submitted += 1
                 except Exception as e:
-                    logger.error(f"Failed to submit traditional order {order.ticker}: {e}")
-                    execution_report.errors.append(f"Traditional order {order.ticker}: {e}")
+                    logger.error("Failed to submit traditional order", exc_info=True)
+                    execution_report.errors.append("Traditional order failed")
                     execution_report.success = False
         
         # Track execution
         self.execution_history.append(execution_report)
         
-        logger.info(f"Batch {execution_id}: {execution_report.orders_submitted} orders submitted")
+        logger.info("Batch execution complete")
         
         return execution_report
     
@@ -403,14 +401,14 @@ class SnapTradeExecutor:
         """
         
         if order_id not in self.orders:
-            logger.warning(f"Order not found: {order_id}")
+            logger.warning("Order not found")
             return OrderStatus.REJECTED
         
         order = self.orders[order_id]
         
         # In production: Call SnapTrade API - GET /accounts/{account_id}/orders/{snaptrade_order_id}
         
-        logger.debug(f"Order {order_id} status: {order.status.value}")
+        logger.debug("Order status checked")
         
         return order.status
     
@@ -436,11 +434,11 @@ class SnapTradeExecutor:
                 return False
             
             if order.status == OrderStatus.FILLED:
-                logger.info(f"Order {order_id} filled at {order.average_fill_price}")
+                logger.info("Order filled")
                 return True
             
             if (datetime.now() - start_time).total_seconds() > timeout_seconds:
-                logger.warning(f"Order {order_id} timeout after {timeout_seconds}s")
+                logger.warning("Order fill timeout")
                 return False
             
             time.sleep(1)
@@ -485,7 +483,7 @@ class SnapTradeExecutor:
             Quote data (price, bid, ask, volume)
         """
         
-        logger.debug(f"Fetching quote for {ticker}")
+        logger.debug("Fetching quote")
         
         # In production: Call SnapTrade API - GET /security/{security_id}/quote
         
@@ -508,7 +506,7 @@ class SnapTradeExecutor:
             tickers: List of ticker symbols
         """
         
-        logger.info(f"Updating market data for {len(tickers)} securities")
+        logger.info("Updating market data")
         
         for ticker in tickers:
             # Determine asset class

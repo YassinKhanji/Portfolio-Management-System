@@ -72,7 +72,7 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
         ).all()
         
         if not connections:
-            logger.debug(f"No active connections for user {user_id}")
+            logger.debug("No active connections; skipping user holdings sync")
             return result
         
         # Collect all holdings from all accounts
@@ -81,7 +81,7 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
         
         for connection in connections:
             if not connection.snaptrade_user_id or not connection.snaptrade_user_secret:
-                logger.debug(f"Skipping connection {connection.id} - missing credentials")
+                logger.debug("Skipping connection - missing credentials")
                 continue
                 
             try:
@@ -139,10 +139,10 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
                 connection.account_balance = holdings_data.get('total_value', 0)
                 connection.updated_at = datetime.now(timezone.utc)
                 
-                logger.debug(f"Fetched {len(holdings_data.get('holdings', []))} holdings from {connection.broker} for user {user_id}")
+                logger.debug("Fetched holdings from broker")
                 
             except Exception as e:
-                logger.error(f"Failed to fetch holdings from {connection.broker} for user {user_id}: {e}")
+                logger.error("Failed to fetch holdings from broker", exc_info=True)
                 result['errors'] += 1
                 continue
         
@@ -187,7 +187,7 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
                 logger.warning(f"Failed to fetch orders from {connection.broker}: {e}")
                 continue
         
-        logger.info(f"Found last orders for {len(last_orders_by_symbol)} symbols")
+        logger.info("Fetched recent orders for cost basis")
         
         # Update positions in database
         existing_positions = {p.symbol: p for p in db.query(Position).filter(Position.user_id == user_id).all()}
@@ -207,7 +207,6 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
                     # Order prices from SnapTrade are already in the account's currency (CAD for Kraken)
                     # No conversion needed - use the price as-is
                     symbol_cost_basis = order_price
-                    logger.debug(f"Using order price {order_price} as cost basis for {symbol}")
             
             # Get last order info for this symbol
             last_order = last_orders_by_symbol.get(symbol, {})
@@ -261,13 +260,12 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
         for symbol, position in existing_positions.items():
             if symbol not in all_holdings:
                 db.delete(position)
-                logger.debug(f"Removed stale position {symbol} for user {user_id}")
         
         db.commit()
-        logger.info(f"Synced {result['synced']} positions for user {user_id}, total value: ${total_value:,.2f}")
+        logger.info("Holdings sync complete")
         
     except Exception as e:
-        logger.error(f"Failed to sync holdings for user {user_id}: {e}", exc_info=True)
+        logger.error("Failed to sync holdings", exc_info=True)
         db.rollback()
         result['errors'] += 1
     
@@ -311,10 +309,7 @@ def sync_all_holdings_sync():
             total_aum += result['total_value']
             users_processed += 1
         
-        logger.info(
-            f"[OK] Holdings sync completed: {users_processed} users, "
-            f"{total_synced} positions, ${total_aum:,.2f} AUM, {total_errors} errors"
-        )
+        logger.info("[OK] Holdings sync completed")
         
         return {
             'users_processed': users_processed,
@@ -324,7 +319,7 @@ def sync_all_holdings_sync():
         }
         
     except Exception as e:
-        logger.error(f"Holdings sync job failed: {e}", exc_info=True)
+        logger.error("Holdings sync job failed", exc_info=True)
         db.rollback()
         return {'users_processed': 0, 'positions_synced': 0, 'total_aum': 0, 'errors': 1}
     finally:
@@ -361,7 +356,7 @@ def sync_user_transactions_sync(user_id: str, db, days: int = 30) -> Dict[str, a
         ).all()
         
         if not connections:
-            logger.debug(f"No active connections for user {user_id}")
+            logger.debug("No active connections; skipping user transaction sync")
             return result
         
         # Get existing transaction IDs to avoid duplicates
@@ -446,18 +441,18 @@ def sync_user_transactions_sync(user_id: str, db, days: int = 30) -> Dict[str, a
                     db.add(transaction)
                     existing_order_ids.add(brokerage_order_id)
                     result['synced'] += 1
-                    logger.debug(f"Synced transaction: {action} {quantity} {symbol} @ {execution_price}")
+                    logger.debug("Synced transaction")
                     
             except Exception as e:
-                logger.error(f"Failed to fetch orders from {connection.broker}: {e}")
+                logger.error("Failed to fetch orders from broker", exc_info=True)
                 result['errors'] += 1
                 continue
         
         db.commit()
-        logger.info(f"Synced {result['synced']} transactions for user {user_id}")
+        logger.info("Transaction sync complete")
         
     except Exception as e:
-        logger.error(f"Failed to sync transactions for user {user_id}: {e}", exc_info=True)
+        logger.error("Failed to sync transactions", exc_info=True)
         db.rollback()
         result['errors'] += 1
     
@@ -490,10 +485,7 @@ def sync_all_transactions_sync(days: int = 30):
             total_errors += result['errors']
             users_processed += 1
         
-        logger.info(
-            f"[OK] Transaction sync completed: {users_processed} users, "
-            f"{total_synced} transactions synced, {total_errors} errors"
-        )
+        logger.info("[OK] Transaction sync completed")
         
         return {
             'users_processed': users_processed,
@@ -502,7 +494,7 @@ def sync_all_transactions_sync(days: int = 30):
         }
         
     except Exception as e:
-        logger.error(f"Transaction sync job failed: {e}", exc_info=True)
+        logger.error("Transaction sync job failed", exc_info=True)
         db.rollback()
         return {'users_processed': 0, 'transactions_synced': 0, 'errors': 1}
     finally:

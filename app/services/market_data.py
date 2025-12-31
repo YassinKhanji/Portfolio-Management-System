@@ -62,7 +62,7 @@ class MarketDataService:
             try:
                 self.crypto_detector = CryptoRegimeDetector(lookback_periods=365 * 15)
             except Exception as e:
-                logger.warning(f"Failed to initialize CryptoRegimeDetector: {e}")
+                logger.warning("Failed to initialize CryptoRegimeDetector")
         self.last_refresh = None
         self.cached_data = None
     
@@ -142,7 +142,7 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
     
     from app.core.currency import convert_to_cad
     
-    logger.info(f"=== get_live_crypto_prices CALLED with symbols: {symbols} ===")
+    logger.info("Fetching live crypto prices")
     
     prices = {}
     symbols_to_fetch = []
@@ -155,7 +155,7 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
             cached_price, cached_time = _price_cache[symbol_upper]
             if current_time - cached_time < _PRICE_CACHE_TTL_SECONDS:
                 prices[symbol_upper] = cached_price
-                logger.debug(f"Using cached price for {symbol_upper}: ${cached_price}")
+                logger.debug("Using cached crypto price")
                 continue
         
         # Map to Kraken trading pair
@@ -168,7 +168,7 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
             if base_symbol != symbol_upper and base_symbol in CRYPTO_SYMBOL_MAP:
                 kraken_pair = CRYPTO_SYMBOL_MAP[base_symbol]
                 symbols_to_fetch.append((symbol_upper, kraken_pair))
-                logger.info(f"Mapped staking variant {symbol_upper} to base {base_symbol}")
+                logger.info("Mapped staking variant to base symbol")
     
     if not symbols_to_fetch:
         return prices
@@ -197,17 +197,15 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
                         # Check if this is a USD pair - convert to CAD if so
                         if kraken_pair.endswith('/USD'):
                             price_cad = convert_to_cad(float(price), "USD")
-                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
                             price = price_cad
                         else:
                             # Already in CAD
                             price = float(price)
-                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
                         
                         prices[original_symbol] = price
                         _price_cache[original_symbol] = (price, current_time)
         except Exception as e:
-            logger.warning(f"Batch ticker fetch failed, trying individual: {e}")
+            logger.warning("Batch ticker fetch failed, trying individual")
             # Fallback: fetch individually
             for original_symbol, kraken_pair in symbols_to_fetch:
                 try:
@@ -217,21 +215,19 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
                         # Check if this is a USD pair - convert to CAD if so
                         if kraken_pair.endswith('/USD'):
                             price_cad = convert_to_cad(float(price), "USD")
-                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
                             price = price_cad
                         else:
                             price = float(price)
-                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
                         
                         prices[original_symbol] = price
                         _price_cache[original_symbol] = (price, current_time)
                 except Exception as inner_e:
-                    logger.warning(f"Failed to fetch price for {original_symbol} ({kraken_pair}): {inner_e}")
+                    logger.warning("Failed to fetch crypto price")
                     
     except ImportError:
         logger.error("CCXT library not installed. Cannot fetch live crypto prices.")
     except Exception as e:
-        logger.error(f"Error fetching live crypto prices: {e}")
+        logger.error("Error fetching live crypto prices")
     
     return prices
 
@@ -255,7 +251,7 @@ def get_live_equity_price(symbol: str) -> Optional[float]:
     if symbol_upper in _price_cache:
         cached_price, cached_time = _price_cache[symbol_upper]
         if current_time - cached_time < _PRICE_CACHE_TTL_SECONDS:
-            logger.debug(f"Using cached price for {symbol_upper}: ${cached_price}")
+            logger.debug("Using cached equity price")
             return cached_price
     
     try:
@@ -275,13 +271,13 @@ def get_live_equity_price(symbol: str) -> Optional[float]:
         
         if price and price > 0:
             _price_cache[symbol_upper] = (float(price), current_time)
-            logger.info(f"Fetched live price for {symbol_upper}: ${price}")
+            logger.info("Fetched live equity price")
             return float(price)
             
     except ImportError:
         logger.error("yfinance library not installed. Cannot fetch live equity prices.")
     except Exception as e:
-        logger.warning(f"Failed to fetch price for {symbol}: {e}")
+        logger.warning("Failed to fetch equity price")
     
     return None
 
@@ -324,8 +320,7 @@ def update_holdings_with_live_prices(
                 quantity = holding.get('quantity', 0)
                 if quantity > 0:
                     holding['market_value'] = quantity * new_price
-                    
-                logger.info(f"Updated {symbol} price: {old_price} -> {new_price}")
+                logger.info("Updated holding with live crypto price")
     else:
         # Equity - fetch prices individually (less common)
         for holding in holdings:
@@ -343,7 +338,6 @@ def update_holdings_with_live_prices(
                 quantity = holding.get('quantity', 0)
                 if quantity > 0:
                     holding['market_value'] = quantity * live_price
-                    
-                logger.info(f"Updated {symbol} price: {old_price} -> {live_price}")
+                logger.info("Updated holding with live equity price")
     
     return holdings

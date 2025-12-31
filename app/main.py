@@ -63,9 +63,9 @@ async def lifespan(app: FastAPI):
             from app.jobs.holdings_sync import sync_all_holdings_sync
             logger.info("Running initial holdings sync (background)...")
             result = sync_all_holdings_sync()
-            logger.info(f"Initial sync complete: {result.get('users_processed', 0)} users, ${result.get('total_aum', 0):,.2f} AUM")
+            logger.info("Initial sync complete")
         except Exception as sync_err:
-            logger.warning(f"Initial holdings sync failed: {sync_err}")
+            logger.warning("Initial holdings sync failed", exc_info=True)
     
     asyncio.create_task(delayed_initial_sync())
     

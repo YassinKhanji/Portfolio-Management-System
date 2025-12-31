@@ -65,7 +65,7 @@ class TradeExecutor:
                 logger.error("Emergency stop active; aborting trade execution")
                 raise RuntimeError("Trading halted: emergency_stop is active")
 
-            logger.info(f"Executing {len(trades)} trades with account-type routing...")
+            logger.info("Executing trades")
             
             for symbol, trade_info in trades.items():
                 try:
@@ -92,10 +92,10 @@ class TradeExecutor:
                         "order_id": result.order_id
                     })
                     
-                    logger.info(f"Executed: {action} {quantity} {symbol}")
+                    logger.info("Trade executed")
                 
                 except SnapTradeClientError as e:
-                    logger.error(f"Trade failed for {symbol}: {str(e)}")
+                    logger.error("Trade failed", exc_info=True)
                     executed.append({
                         "symbol": symbol,
                         "action": action,
@@ -104,10 +104,10 @@ class TradeExecutor:
                     })
         
         except Exception as e:
-            logger.error(f"Trade execution error: {str(e)}")
+            logger.error("Trade execution error", exc_info=True)
             raise
         
-        logger.info(f"Trade execution complete: {len(executed)} trades")
+        logger.info("Trade execution complete")
         return executed
     
     def get_current_holdings(self, account_id: str = None) -> Dict:
@@ -125,7 +125,7 @@ class TradeExecutor:
             }
         
         except SnapTradeClientError as e:
-            logger.error(f"Failed to get holdings: {str(e)}")
+            logger.error("Failed to get holdings", exc_info=True)
             raise
     
     def cancel_trade(self, account_id: str, order_id: str) -> bool:
@@ -136,5 +136,5 @@ class TradeExecutor:
                 raise RuntimeError("Trading halted: emergency_stop is active")
             return self.client.cancel_order(account_id, order_id)
         except SnapTradeClientError as e:
-            logger.error(f"Failed to cancel order: {str(e)}")
+            logger.error("Failed to cancel order", exc_info=True)
             raise

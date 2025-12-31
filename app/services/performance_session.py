@@ -22,6 +22,7 @@ from app.models.database import (
     User,
     Position
 )
+from app.core.logging import safe_log_id
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class PerformanceSessionService:
         # Check if there's already an active session
         existing = self.get_active_session(user_id)
         if existing:
-            logger.info(f"Active session already exists for user {user_id}, returning existing session")
+            logger.info(f"Active session already exists for user {safe_log_id(user_id, 'user')}, returning existing session")
             return existing
         
         now = datetime.now(timezone.utc)
@@ -98,7 +99,7 @@ class PerformanceSessionService:
         self.db.commit()
         self.db.refresh(session)
         
-        logger.info(f"Started new performance session {session.id} for user {user_id}")
+        logger.info(f"Started new performance session {safe_log_id(session.id, 'session')} for user {safe_log_id(user_id, 'user')}")
         
         # Create initial portfolio snapshot at $1.00 baseline
         self._create_initial_snapshot(session)
@@ -125,7 +126,7 @@ class PerformanceSessionService:
         """
         session = self.get_active_session(user_id)
         if not session:
-            logger.warning(f"No active session found for user {user_id}")
+            logger.warning(f"No active session found for user {safe_log_id(user_id, 'user')}")
             return None
         
         session.is_active = False
@@ -134,7 +135,7 @@ class PerformanceSessionService:
         self.db.commit()
         self.db.refresh(session)
         
-        logger.info(f"Stopped performance session {session.id} for user {user_id}")
+        logger.info(f"Stopped performance session {safe_log_id(session.id, 'session')} for user {safe_log_id(user_id, 'user')}")
         return session
     
     def resume_session(self, user_id: str) -> Optional[PerformanceSession]:
@@ -163,7 +164,7 @@ class PerformanceSessionService:
         )
         
         if not session:
-            logger.warning(f"No stopped session found for user {user_id}")
+            logger.warning(f"No stopped session found for user {safe_log_id(user_id, 'user')}")
             return None
         
         session.is_active = True
@@ -177,7 +178,7 @@ class PerformanceSessionService:
         self.db.commit()
         self.db.refresh(session)
         
-        logger.info(f"Resumed performance session {session.id} for user {user_id}")
+        logger.info(f"Resumed performance session {safe_log_id(session.id, 'session')} for user {safe_log_id(user_id, 'user')}")
         return session
     
     def _create_initial_snapshot(self, session: PerformanceSession) -> None:
@@ -203,7 +204,7 @@ class PerformanceSessionService:
         self.db.add(initial_snapshot)
         self.db.commit()
         
-        logger.info(f"Created initial $1.00 baseline snapshot for session {session.id}")
+        logger.info(f"Created initial $1.00 baseline snapshot for session {safe_log_id(session.id, 'session')}")
     
     def _populate_benchmark_history(self, session: PerformanceSession) -> int:
         """
@@ -269,7 +270,7 @@ class PerformanceSessionService:
                 snapshots_created += 1
             
             self.db.commit()
-            logger.info(f"Created {snapshots_created} benchmark snapshots for session {session.id}")
+            logger.info(f"Created {snapshots_created} benchmark snapshots for session {safe_log_id(session.id, 'session')}")
             return snapshots_created
             
         except Exception as e:

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.models.database import SessionLocal, User, Position, PortfolioSnapshot, PerformanceSession
+from app.core.logging import safe_log_id, safe_log_email
 from datetime import datetime, timezone
 import uuid
 import logging
@@ -62,7 +63,7 @@ def create_snapshot_sync():
                     crypto_value += p.market_value or 0
             
             if total_value <= 0:
-                logger.info(f"Skipping user {user.email} - no value")
+                logger.info(f"Skipping user {safe_log_email(user.email)} - no value")
                 continue
             
             # Build positions snapshot
@@ -91,7 +92,7 @@ def create_snapshot_sync():
                 )
                 db.add(session)
                 db.commit()
-                logger.info(f"Created new session for user {user.email}")
+                logger.info(f"Created new session for user {safe_log_email(user.email)}")
             
             # Create snapshot
             snapshot = PortfolioSnapshot(
@@ -112,7 +113,7 @@ def create_snapshot_sync():
             db.commit()
             
             snapshot_count += 1
-            logger.info(f"Created snapshot for user {user.email}: ${total_value:.2f}")
+            logger.info(f"Created snapshot for user {safe_log_email(user.email)}: ${total_value:.2f}")
         
         logger.info(f"[OK] Created {snapshot_count} snapshots")
         return snapshot_count

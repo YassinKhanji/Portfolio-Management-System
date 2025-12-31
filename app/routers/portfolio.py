@@ -36,6 +36,7 @@ from ..services.snaptrade_integration import get_snaptrade_client
 from ..services.performance_session import PerformanceSessionService
 from ..services.market_data import get_live_crypto_prices, get_live_equity_price
 from ..core.currency import convert_to_cad
+from ..core.logging import safe_log_id, safe_log_email
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -892,9 +893,9 @@ async def update_client(user_id: str, payload: dict, db: Session = Depends(get_d
                     for sid in snaptrade_user_ids:
                         try:
                             snaptrade.authentication.delete_snap_trade_user(user_id=sid)
-                            logger.info(f"Deleted SnapTrade user {sid} during suspension of client {user_id}")
+                            logger.info(f"Deleted SnapTrade user {safe_log_id(sid, 'snaptrade')} during suspension of client {safe_log_id(user_id, 'client')}")
                         except Exception as exc:
-                            logger.warning(f"Failed to delete SnapTrade user {sid}: {exc}")
+                            logger.warning(f"Failed to delete SnapTrade user {safe_log_id(sid, 'snaptrade')}: {exc}")
                 except Exception as exc:
                     logger.warning(f"SnapTrade client init failed during suspension: {exc}")
 
@@ -920,7 +921,7 @@ async def update_client(user_id: str, payload: dict, db: Session = Depends(get_d
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to update client {user_id}: {str(e)}")
+        logger.error(f"Failed to update client {safe_log_id(user_id, 'client')}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update client")
 
 
@@ -945,9 +946,9 @@ async def delete_client(user_id: str, db: Session = Depends(get_db)):
                 for sid in snaptrade_user_ids:
                     try:
                         snaptrade.authentication.delete_snap_trade_user(user_id=sid)
-                        logger.info(f"Deleted SnapTrade user {sid} for client {user_id}")
+                        logger.info(f"Deleted SnapTrade user {safe_log_id(sid, 'snaptrade')} for client {safe_log_id(user_id, 'client')}")
                     except Exception as exc:
-                        logger.warning(f"Failed to delete SnapTrade user {sid}: {exc}")
+                        logger.warning(f"Failed to delete SnapTrade user {safe_log_id(sid, 'snaptrade')}: {exc}")
                         # Continue with deletion even if SnapTrade cleanup fails
             except Exception as exc:
                 logger.warning(f"SnapTrade client init failed during client delete: {exc}")
@@ -975,7 +976,7 @@ async def delete_client(user_id: str, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to delete client {user_id}: {str(e)}")
+        logger.error(f"Failed to delete client {safe_log_id(user_id, 'client')}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete client")
 
 
@@ -1210,7 +1211,7 @@ async def get_portfolio_positions(
         List of portfolio positions with current values and live prices
     """
     try:
-        logger.info(f"Fetching positions (user_id={user_id}, risk_profile={risk_profile}, limit={limit})...")
+        logger.info(f"Fetching positions ({safe_log_id(user_id, 'user')}, risk_profile={risk_profile}, limit={limit})...")
 
         query = db.query(Position)
 
@@ -1317,7 +1318,7 @@ async def get_portfolio_transactions(
         List of recent transactions with user info for admin views
     """
     try:
-        logger.info(f"Fetching transactions (user_id={user_id}, risk_profile={risk_profile}, limit={limit})...")
+        logger.info(f"Fetching transactions ({safe_log_id(user_id, 'user')}, risk_profile={risk_profile}, limit={limit})...")
 
         query = db.query(Transaction, User).join(User, Transaction.user_id == User.id)
 
@@ -1368,7 +1369,7 @@ async def get_portfolio_performance(
     - Supports common period tokens: 7D, 1M, 3M, 6M, 1Y, YTD, ALL.
     """
     try:
-        logger.info(f"Fetching performance data (period={period}, user_id={user_id}, risk_profile={risk_profile})...")
+        logger.info(f"Fetching performance data (period={period}, {safe_log_id(user_id, 'user')}, risk_profile={risk_profile})...")
 
         # Determine lookback window and resolution (auto: hourly for 1D/7D)
         now = datetime.now(timezone.utc)
@@ -1639,7 +1640,7 @@ async def get_portfolio_allocation(
         Allocation by asset type and by individual assets
     """
     try:
-        logger.info(f"Fetching allocation data (user_id={user_id}, risk_profile={risk_profile})...")
+        logger.info(f"Fetching allocation data ({safe_log_id(user_id, 'user')}, risk_profile={risk_profile})...")
         
         query = db.query(Position)
 

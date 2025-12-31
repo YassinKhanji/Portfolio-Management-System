@@ -7,7 +7,7 @@ Based on SYSTEM_SPECIFICATIONS.md
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest, holdings_sync
+from app.jobs import data_refresh, daily_rebalance, health_check, portfolio_snapshot, email_digest, holdings_sync, snaptrade_secret_rotation
 import asyncio
 from app.jobs.utils import is_emergency_stop_active
 from app.core.config import get_settings
@@ -141,6 +141,19 @@ def add_jobs():
         replace_existing=True
     )
     logger.info("[OK] Added job: weekly_email_digest (Saturday 12:00 PM EST)")
+
+    # ========================================================================
+    # 6. SNAPTRADE USER SECRET ROTATION: Sunday at 01:00 AM EST
+    # Rotates SnapTrade user secrets and persists the new secret in DB.
+    # ========================================================================
+    scheduler.add_job(
+        snaptrade_secret_rotation.rotate_snaptrade_user_secrets,
+        CronTrigger(day_of_week="sun", hour=6, minute=0),  # 01:00 EST = 06:00 UTC
+        id="snaptrade_secret_rotation",
+        name="Rotate SnapTrade User Secrets (Sunday 01:00 EST)",
+        replace_existing=True,
+    )
+    logger.info("[OK] Added job: snaptrade_secret_rotation (Sunday 01:00 EST)")
 
 
 def start_scheduler():

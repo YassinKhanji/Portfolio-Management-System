@@ -63,7 +63,7 @@ async def create_alert_with_email(
         db.commit()
         db.refresh(alert)
         
-        logger.info(f"[OK] Alert created: {alert_type} (severity={severity}, user_id={user_id})")
+        logger.info("[OK] Alert created")
         
         # Send email immediately for critical/emergency alerts
         if email_immediately and severity in ["critical", "emergency"]:
@@ -81,17 +81,17 @@ async def create_alert_with_email(
                     if success:
                         alert.email_sent = True
                         db.commit()
-                        logger.info(f"[OK] Email sent for alert {alert.id}")
+                        logger.info("[OK] Alert email sent")
                     else:
-                        logger.warning(f"Failed to send email for alert {alert.id}")
+                        logger.warning("Failed to send alert email")
                         
                 except Exception as e:
-                    logger.error(f"Error sending alert email: {str(e)}", exc_info=True)
+                    logger.error("Error sending alert email", exc_info=True)
         
         return alert
         
     except Exception as e:
-        logger.error(f"Error creating alert: {str(e)}", exc_info=True)
+        logger.error("Error creating alert", exc_info=True)
         db.rollback()
         return None
         

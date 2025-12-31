@@ -54,7 +54,7 @@ class CryptoRegimeDetector:
         Returns:
             DataFrame with OHLCV data (Open, High, Low, Close, Volume)
         """
-        logger.info(f"Fetching Kraken data via CCXT for {symbols}...")
+        logger.info("Fetching Kraken market data via CCXT")
         
         try:
             import ccxt
@@ -69,7 +69,7 @@ class CryptoRegimeDetector:
             
             for symbol in symbols:
                 try:
-                    logger.info(f"Fetching {symbol} from Kraken...")
+                    logger.info("Fetching symbol data from Kraken")
                     
                     # Fetch OHLCV data (daily candles)
                     # Note: Kraken limits historical data fetch, we'll get as much as possible
@@ -89,10 +89,10 @@ class CryptoRegimeDetector:
                     df['symbol'] = symbol
                     
                     all_data[symbol] = df
-                    logger.info(f"Successfully fetched {len(df)} candles for {symbol}")
+                    logger.info("Fetched candles")
                     
                 except Exception as e:
-                    logger.error(f"Failed to fetch {symbol}: {str(e)}")
+                    logger.error("Failed to fetch symbol data", exc_info=True)
                     continue
             
             # Combine all symbols into a single DataFrame
@@ -107,7 +107,7 @@ class CryptoRegimeDetector:
             logger.error("CCXT library not installed. Install with: pip install ccxt")
             return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error fetching Kraken data: {str(e)}")
+            logger.error("Error fetching Kraken data", exc_info=True)
             return pd.DataFrame()
     
     def detect_regimes(self) -> Optional[pd.DataFrame]:

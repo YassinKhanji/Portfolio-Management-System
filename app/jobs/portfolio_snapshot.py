@@ -194,7 +194,7 @@ def _get_or_create_session(db, user_id: str) -> PerformanceSession:
     # Pre-populate benchmark history
     _populate_benchmark_history(db, session)
     
-    logger.info(f"Auto-created performance session for user {user_id}")
+    logger.info("Auto-created performance session")
     return session
 
 

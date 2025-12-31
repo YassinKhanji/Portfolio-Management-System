@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from snaptrade_client import SnapTrade
 
 from ..core.config import get_settings
+from ..core.logging import safe_log_id, safe_log_email
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -47,7 +48,7 @@ def _to_float(value, field_name: str = "") -> float:
         if isinstance(value, list) and value:
             return _to_float(value[0], field_name)
     except (TypeError, ValueError):
-        logger.warning("Could not parse numeric field %s from value %r", field_name or "", value)
+        logger.warning("Could not parse numeric field %s from value", field_name or "")
     return 0.0
 
 
@@ -139,14 +140,57 @@ def register_snaptrade_user(user_id: str) -> tuple[str, str]:
         if "already exist" in msg or "1010" in msg:
             fallback_id = f"{user_id}-{uuid.uuid4().hex[:8]}"
             try:
-                logger.warning("SnapTrade userId %s exists; retrying with %s", user_id, fallback_id)
+                logger.warning("SnapTrade userId %s exists; retrying with fallback", safe_log_id(user_id, 'user'))
                 result = _attempt(fallback_id)
                 return result["userId"], result["userSecret"]
             except Exception as e2:
-                logger.error("Fallback SnapTrade registration failed for %s: %s", fallback_id, e2)
+                logger.error("Fallback SnapTrade registration failed: %s", e2)
                 raise SnapTradeClientError(f"User registration failed after fallback: {e2}")
-        logger.error(f"Failed to register SnapTrade user {user_id}: {e}")
+        logger.error(f"Failed to register SnapTrade user {safe_log_id(user_id, 'user')}: {e}")
         raise SnapTradeClientError(f"User registration failed: {e}")
+
+
+def reset_snaptrade_user_secret(user_id: str, user_secret: str) -> tuple[str, str]:
+    """Reset (rotate) a SnapTrade user's secret and return (userId, userSecret).
+
+    This calls SnapTrade's `resetUserSecret` endpoint. The returned secret must be
+    persisted to our DB immediately, otherwise future SnapTrade calls will fail.
+    """
+
+    try:
+        snaptrade = get_snaptrade_client()
+        response = snaptrade.authentication.reset_snap_trade_user_secret(
+            user_id=user_id,
+            user_secret=user_secret,
+        )
+        body = response.body if hasattr(response, "body") else response
+        if not isinstance(body, dict):
+            raise SnapTradeClientError("Unexpected response shape from reset user secret")
+
+        new_user_id = body.get("userId") or body.get("user_id") or user_id
+        new_secret = body.get("userSecret") or body.get("user_secret")
+        if not new_secret:
+            raise SnapTradeClientError("No userSecret returned from reset user secret")
+
+        # SnapTrade should keep the same userId; warn (but still return) if it differs.
+        if new_user_id and new_user_id != user_id:
+            logger.warning(
+                "SnapTrade reset returned different userId (expected %s got %s)",
+                safe_log_id(user_id, "snaptrade"),
+                safe_log_id(str(new_user_id), "snaptrade"),
+            )
+
+        return str(new_user_id), str(new_secret)
+
+    except SnapTradeClientError:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to reset SnapTrade secret for %s: %s",
+            safe_log_id(user_id, "snaptrade"),
+            e,
+        )
+        raise SnapTradeClientError(f"Reset user secret failed: {e}")
 
 
 def generate_connection_url(
@@ -201,7 +245,7 @@ def generate_connection_url(
         if not redirect_uri:
             raise SnapTradeClientError("No redirectURI returned from API")
         
-        logger.info(f"Generated connection URL for user: {user_id}")
+        logger.info(f"Generated connection URL for user: {safe_log_id(user_id, 'user')}")
         return redirect_uri
         
     except Exception as e:
@@ -297,7 +341,7 @@ class SnapTradeClient:
                 )
                 accounts.append(account)
             
-            logger.info(f"Retrieved {len(accounts)} accounts for user {self.user_id}")
+            logger.info(f"Retrieved {len(accounts)} accounts for user {safe_log_id(self.user_id, 'user')}")
             return accounts
         
         except Exception as e:
@@ -368,7 +412,7 @@ class SnapTradeClient:
                     })
                     total_balance += cash
             
-            logger.info(f"Retrieved balances for user {self.user_id}: total={total_balance}")
+            logger.info(f"Retrieved balances for user {safe_log_id(self.user_id, 'user')}: total=${total_balance:.2f}")
             return {
                 'total_balance': total_balance,
                 'accounts': accounts_balances,
@@ -426,7 +470,7 @@ class SnapTradeClient:
                     total_cash += account_cash
                     
                 except Exception as e:
-                    logger.warning(f"Failed to get holdings for account {account.id}: {e}")
+                    logger.warning(f"Failed to get holdings for account {safe_log_id(account.id, 'account')}: {e}")
                     continue
             
             return {
@@ -627,9 +671,9 @@ class SnapTradeClient:
                     if cash_amount > 0:
                         cash_balances[currency_code] = cash_balances.get(currency_code, 0) + cash_amount
                         total_cash += cash_amount
-                        logger.info(f"Found cash balance: {cash_amount} {currency_code}")
+                        logger.debug(f"Found cash balance: ${cash_amount:.2f} {currency_code}")
             
-            logger.info(f"Retrieved {len(holdings)} holdings and {total_cash} total cash for account {account_id}")
+            logger.info(f"Retrieved {len(holdings)} holdings and ${total_cash:.2f} total cash for account {safe_log_id(account_id, 'account')}")
             return HoldingsResult(holdings=holdings, cash_balances=cash_balances, total_cash=total_cash)
         
         except Exception as e:

@@ -54,7 +54,7 @@ async def rebalance_user(
         }
     """
     try:
-        logger.info(f"Rebalance requested for user {user_id} (force={force}, dry_run={dry_run})")
+        logger.info("Rebalance requested")
         
         # Verify user exists
         user = db.query(User).filter(User.id == user_id).first()
@@ -141,7 +141,7 @@ async def rebalance_user(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Rebalance failed for user {user_id}: {str(e)}")
+        logger.error("Rebalance failed", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -208,7 +208,7 @@ async def rebalance_all_users(
                     
                     rebalanced += 1
             except Exception as e:
-                logger.error(f"Failed to rebalance user {user.id}: {str(e)}")
+                logger.error("Failed to rebalance user", exc_info=True)
                 failed += 1
                 continue
         
@@ -233,7 +233,7 @@ async def rebalance_all_users(
             "message": "Bulk rebalance queued"
         }
     except Exception as e:
-        logger.error(f"Bulk rebalance failed: {str(e)}")
+        logger.error("Bulk rebalance failed", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -255,7 +255,7 @@ async def calculate_portfolio(user_id: str):
         }
     """
     try:
-        logger.info(f"Portfolio calculation requested for user {user_id}")
+        logger.info("Portfolio calculation requested")
         
         # PLACEHOLDER: Integrate with allocation calculator
         
@@ -270,5 +270,5 @@ async def calculate_portfolio(user_id: str):
             "trades_needed": []
         }
     except Exception as e:
-        logger.error(f"Portfolio calculation failed: {str(e)}")
+        logger.error("Portfolio calculation failed", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

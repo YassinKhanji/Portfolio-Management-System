@@ -61,11 +61,9 @@ class EmailService:
             log = Log(
                 timestamp=datetime.now(timezone.utc),
                 level="info" if success else "error",
-                message=f"Email {'sent' if success else 'failed'}: {subject} -> {to_email}",
+                message=f"Email {'sent' if success else 'failed'}",
                 component=component,
                 metadata_json={
-                    "to_email": to_email,
-                    "subject": subject,
                     "success": success,
                     "reason": reason,
                     **(metadata or {})
@@ -119,7 +117,7 @@ class EmailService:
             )
             return result
         except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {str(e)}", exc_info=True)
+            logger.error("Failed to send email", exc_info=True)
             self._log_email_event(
                 to_email=to_email,
                 subject=subject,
@@ -158,17 +156,17 @@ class EmailService:
                 server.login(self.username, self.password)
                 server.send_message(msg)
 
-            logger.info(f"[OK] Email sent to {to_email}: {subject}")
+            logger.info("[OK] Email sent")
             return True
 
         except smtplib.SMTPAuthenticationError:
             logger.error("SMTP Authentication failed. Check email credentials.")
             return False
         except smtplib.SMTPException as e:
-            logger.error(f"SMTP error: {str(e)}")
+            logger.error("SMTP error", exc_info=True)
             return False
         except Exception as e:
-            logger.error(f"Error sending email: {str(e)}", exc_info=True)
+            logger.error("Error sending email", exc_info=True)
             return False
 
     async def send_rebalance_confirmation(
