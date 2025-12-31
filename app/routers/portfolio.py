@@ -591,7 +591,7 @@ async def get_portfolio_health_metrics(
             if bench_val is not None:
                 last_bench = bench_val
 
-            dt = datetime.combine(day, datetime.min.time())
+            dt = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
             growth.append({
                 "date": dt.isoformat() + "Z",
                 "portfolio": round(by_day[day], 2),
@@ -1263,7 +1263,7 @@ async def get_portfolio_performance(
         use_hourly = desired_resolution == "hourly" or (desired_resolution == "auto" and upper in {"1D", "7D"})
 
         if upper == "YTD":
-            start_date = datetime(now.year, 1, 1)
+            start_date = datetime(now.year, 1, 1, tzinfo=timezone.utc)
         else:
             days_map = {
                 "1D": 1,
@@ -1277,6 +1277,14 @@ async def get_portfolio_performance(
             days = days_map.get(upper, 30)
             start_date = now - timedelta(days=days)
 
+        def _ensure_tz_aware(dt):
+            """Ensure datetime is timezone-aware (UTC)."""
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
         # Fetch relevant users
         user_query = db.query(User)
         if user_id:
@@ -1288,7 +1296,7 @@ async def get_portfolio_performance(
         if not users:
             return {"period": period, "data": [], "total_return": 0, "benchmark_return": None}
 
-        created_map = {u.id: (u.created_at or now) for u in users}
+        created_map = {u.id: _ensure_tz_aware(u.created_at) or now for u in users}
         user_ids = list(created_map.keys())
 
         # Pull snapshots within window
@@ -1302,13 +1310,14 @@ async def get_portfolio_performance(
         # Aggregate by bucket (hourly or daily); skip data before a user's creation date
         buckets: dict = {}
         for snap in snapshots:
-            created_at = created_map.get(snap.user_id, snap.recorded_at)
-            if snap.recorded_at < created_at:
+            snap_recorded = _ensure_tz_aware(snap.recorded_at)
+            created_at = created_map.get(snap.user_id, snap_recorded)
+            if snap_recorded < created_at:
                 continue
             if use_hourly:
-                key_dt = snap.recorded_at.replace(minute=0, second=0, microsecond=0)
+                key_dt = snap_recorded.replace(minute=0, second=0, microsecond=0)
             else:
-                key_dt = datetime.combine(snap.recorded_at.date(), datetime.min.time())
+                key_dt = datetime.combine(snap_recorded.date(), datetime.min.time(), tzinfo=timezone.utc)
             buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
 
         if not buckets:
