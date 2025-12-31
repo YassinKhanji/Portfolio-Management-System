@@ -858,17 +858,22 @@ async def snaptrade_holdings(
                         "average_purchase_price": avg_purchase_price,  # Cost basis in CAD
                     }
                 )
-            # Sum holdings value in CAD
+            
+            # Sum holdings value from the positions we just created (already in CAD)
+            # Filter to only non-cash positions from this account
             holdings_value = sum(
-                convert_to_cad(h.market_value, h.currency or "USD") 
-                for h in holdings if h.market_value
+                p["market_value"] for p in positions_out 
+                if p["account_id"] == acct.id and p["asset_class"] != "cash"
             )
             logger.info(f"Total holdings value for {acct.id} (in CAD): {holdings_value}")
             
+            # Convert cash to CAD as well
+            cash_currency = acct.currency or "USD"
+            acct_cash_cad = convert_to_cad(acct_cash, cash_currency)
+            logger.info(f"Cash for {acct.id}: {acct_cash} {cash_currency} -> {acct_cash_cad} CAD")
+            
             # Add cash balance as a position so it shows up in the Cash category
-            cash_value = float(acct_cash)
-            if cash_value > 0:
-                currency_code = acct.currency or "CAD"
+            if acct_cash_cad > 0:
                 # Include broker name in the cash display so users know where it's from
                 broker_display = broker.title()  # "kraken" -> "Kraken", "wealthsimple" -> "Wealthsimple"
                 positions_out.append(
@@ -876,19 +881,19 @@ async def snaptrade_holdings(
                         "broker": broker,
                         "account_id": acct.id,
                         "account_name": acct.name,
-                        "symbol": f"{currency_code}",
-                        "name": f"Cash ({currency_code}) - {broker_display}",
-                        "quantity": cash_value,
+                        "symbol": f"CAD",
+                        "name": f"Cash (CAD) - {broker_display}",
+                        "quantity": acct_cash_cad,
                         "price": 1.0,
-                        "market_value": cash_value,
-                        "currency": currency_code,
+                        "market_value": acct_cash_cad,
+                        "currency": "CAD",
                         "asset_class": "cash",
                     }
                 )
             
-            acct_total = holdings_value + acct_cash
+            acct_total = holdings_value + acct_cash_cad
             total_value += acct_total
-            logger.info(f"Account {acct.id} total: holdings({holdings_value}) + cash({acct_cash}) = {acct_total}")
+            logger.info(f"Account {acct.id} total: holdings({holdings_value}) + cash({acct_cash_cad}) = {acct_total}")
 
             accounts_out.append(
                 {
