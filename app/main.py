@@ -97,11 +97,44 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 async def security_headers_middleware(request: Request, call_next):
     """Add security headers to all responses."""
     response = await call_next(request)
+    
+    # Prevent clickjacking
     response.headers["X-Frame-Options"] = "DENY"
+    
+    # Prevent MIME type sniffing
     response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    # XSS protection (legacy, but still useful for older browsers)
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    
+    # Force HTTPS (1 year, include subdomains)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+    
+    # Control referrer information
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Disable unnecessary browser features
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=(), payment=()"
+    
+    # Content Security Policy - restrict resource loading
+    # Allows self, data URIs for images, and specific CDNs if needed
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    
+    # Prevent caching of sensitive responses
+    if "/api/auth" in request.url.path or "/api/admin" in request.url.path:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+    
     return response
 
 # Add CORS middleware
