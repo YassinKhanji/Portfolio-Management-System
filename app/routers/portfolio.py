@@ -1187,29 +1187,27 @@ async def get_portfolio_transactions(
     
     Args:
         user_id: Optional user ID to filter by
+        risk_profile: Optional risk profile to filter by
         limit: Maximum number of transactions to return
         
     Returns:
-        List of recent transactions
+        List of recent transactions with user info for admin views
     """
     try:
         logger.info(f"Fetching transactions (user_id={user_id}, risk_profile={risk_profile}, limit={limit})...")
 
-        query = db.query(Transaction)
+        query = db.query(Transaction, User).join(User, Transaction.user_id == User.id)
 
         if user_id:
             query = query.filter(Transaction.user_id == user_id)
         elif risk_profile:
             normalized_risk = _normalize_risk(risk_profile)
-            user_ids = [u.id for u in db.query(User.id).filter(func.lower(User.risk_profile) == normalized_risk.lower()).all()]
-            if not user_ids:
-                return []
-            query = query.filter(Transaction.user_id.in_(user_ids))
+            query = query.filter(func.lower(User.risk_profile) == normalized_risk.lower())
         
         transactions = query.order_by(Transaction.created_at.desc()).limit(limit).all()
         
         result = []
-        for txn in transactions:
+        for txn, user in transactions:
             result.append({
                 "id": txn.id,
                 "asset": txn.symbol,
@@ -1218,7 +1216,10 @@ async def get_portfolio_transactions(
                 "price": txn.price,
                 "total": txn.quantity * txn.price,
                 "timestamp": txn.executed_at.isoformat() + "Z" if txn.executed_at else txn.created_at.isoformat() + "Z",
-                "status": txn.status or "pending"
+                "status": txn.status or "pending",
+                "user_id": txn.user_id,
+                "user_name": user.full_name or user.email.split('@')[0],
+                "user_email": user.email,
             })
         
         return result
@@ -1301,24 +1302,6 @@ async def get_portfolio_performance(
                 key_dt = datetime.combine(snap.recorded_at.date(), datetime.min.time())
             buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
 
-        # Append a live "now" point (aggregated from current Positions) so dashboards can refresh
-        try:
-            current_total = (
-                db.query(func.coalesce(func.sum(Position.market_value), 0.0))
-                .filter(Position.user_id.in_(user_ids))
-                .scalar()
-            )
-            current_total_f = float(current_total or 0.0)
-            if current_total_f > 0:
-                key_dt_now = (
-                    now.replace(minute=0, second=0, microsecond=0)
-                    if use_hourly
-                    else datetime.combine(now.date(), datetime.min.time())
-                )
-                buckets[key_dt_now] = current_total_f
-        except Exception as live_exc:  # noqa: BLE001
-            logger.warning(f"Failed to compute live aggregated performance point: {live_exc}")
-
         if not buckets:
             return {"period": period, "data": [], "total_return": 0, "benchmark_return": None, "benchmark_available": False, "resolution": "hourly" if use_hourly else "daily"}
 
@@ -1371,6 +1354,118 @@ async def get_portfolio_performance(
 
     except Exception as e:
         logger.error(f"Failed to fetch performance data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/live-returns")
+async def get_live_portfolio_returns(
+    risk_profile: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Return live portfolio returns starting from 0%.
+    
+    Calculates cumulative return as if investing $1 at session start.
+    Returns percentage return data for continuous live chart updates.
+    Includes current live point computed from latest Position market values.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        
+        # Fetch relevant users
+        user_query = db.query(User)
+        if risk_profile:
+            normalized_risk = _normalize_risk(risk_profile)
+            user_query = user_query.filter(func.lower(User.risk_profile) == normalized_risk.lower())
+        users = user_query.all()
+        
+        if not users:
+            return {
+                "data": [{"timestamp": now.isoformat() + "Z", "return_pct": 0.0}],
+                "current_return": 0.0,
+                "base_value": 1.0,
+                "current_value": 1.0,
+            }
+        
+        user_ids = [u.id for u in users]
+        created_map = {u.id: (u.created_at or now) for u in users}
+        
+        # Get the earliest user creation date as the "session start"
+        earliest_created = min(created_map.values())
+        
+        # Pull all snapshots from session start
+        snapshots = db.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.user_id.in_(user_ids),
+            PortfolioSnapshot.recorded_at >= earliest_created
+        ).order_by(PortfolioSnapshot.recorded_at).all()
+        
+        # Aggregate by timestamp (hourly buckets for granularity)
+        buckets: dict = {}
+        for snap in snapshots:
+            created_at = created_map.get(snap.user_id, snap.recorded_at)
+            if snap.recorded_at < created_at:
+                continue
+            # Use hourly buckets for finer granularity
+            key_dt = snap.recorded_at.replace(minute=0, second=0, microsecond=0)
+            buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
+        
+        # Get current live value from Position table
+        current_total = db.query(func.coalesce(func.sum(Position.market_value), 0)).filter(
+            Position.user_id.in_(user_ids)
+        ).scalar() or 0.0
+        
+        # Add current timestamp bucket
+        current_bucket = now.replace(minute=0, second=0, microsecond=0)
+        if current_bucket not in buckets or current_total > 0:
+            buckets[current_bucket] = current_total
+        
+        if not buckets:
+            return {
+                "data": [{"timestamp": now.isoformat() + "Z", "return_pct": 0.0}],
+                "current_return": 0.0,
+                "base_value": 1.0,
+                "current_value": 1.0,
+            }
+        
+        sorted_keys = sorted(buckets.keys())
+        base_value = buckets[sorted_keys[0]] if buckets[sorted_keys[0]] > 0 else 1.0
+        
+        # Convert to percentage returns (starting from 0%)
+        # This is equivalent to tracking growth of $1 invested
+        data = []
+        for key_dt in sorted_keys:
+            value = buckets[key_dt]
+            # Calculate cumulative return percentage
+            return_pct = ((value - base_value) / base_value) * 100 if base_value > 0 else 0.0
+            data.append({
+                "timestamp": key_dt.isoformat() + "Z",
+                "return_pct": round(return_pct, 4),
+                "value": round(value, 2),
+            })
+        
+        # Ensure we have a "now" point with current Position values
+        last_point = data[-1] if data else None
+        current_return = ((current_total - base_value) / base_value) * 100 if base_value > 0 else 0.0
+        
+        # Add live point if it's different from last historical point
+        if last_point and abs(current_return - last_point["return_pct"]) > 0.001:
+            data.append({
+                "timestamp": now.isoformat() + "Z",
+                "return_pct": round(current_return, 4),
+                "value": round(current_total, 2),
+                "is_live": True,
+            })
+        
+        return {
+            "data": data,
+            "current_return": round(current_return, 4),
+            "base_value": round(base_value, 2),
+            "current_value": round(current_total, 2),
+            "session_start": earliest_created.isoformat() + "Z",
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch live returns: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1476,8 +1571,9 @@ async def get_risk_metrics(
     
     Args:
         returnMethod: TWR or MWR
-        period: Return period (1D, 1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y)
-        lookback: Number of days for volatility/risk calculation (30, 90, 365)
+        period: Return period (1D, 1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y) - determines the date range
+        lookback: Number of days for volatility/risk calculation (30, 90, 365) - fallback if period not specified
+        risk_profile: Optional filter by risk profile
         
     Returns:
         Risk metrics including Sharpe ratio, Sortino ratio, Calmar ratio, volatility, max drawdown
@@ -1491,7 +1587,33 @@ async def get_risk_metrics(
         import numpy as np
         
         config = get_settings()
-        lookback_date = datetime.now(timezone.utc) - timedelta(days=lookback)
+        now = datetime.now(timezone.utc)
+        
+        # Determine lookback window from period parameter
+        period_upper = period.upper()
+        if period_upper == "YTD":
+            lookback_date = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+        elif period_upper == "1D":
+            lookback_date = now - timedelta(days=1)
+        elif period_upper == "1W":
+            lookback_date = now - timedelta(days=7)
+        elif period_upper == "1M":
+            lookback_date = now - timedelta(days=30)
+        elif period_upper == "3M":
+            lookback_date = now - timedelta(days=90)
+        elif period_upper == "6M":
+            lookback_date = now - timedelta(days=180)
+        elif period_upper == "1Y":
+            lookback_date = now - timedelta(days=365)
+        elif period_upper == "3Y":
+            lookback_date = now - timedelta(days=365 * 3)
+        elif period_upper == "5Y":
+            lookback_date = now - timedelta(days=365 * 5)
+        elif period_upper == "ALL":
+            lookback_date = now - timedelta(days=365 * 10)  # 10 years max
+        else:
+            # Fallback to lookback parameter
+            lookback_date = now - timedelta(days=lookback)
         
         # Determine which users to include based on risk profile (if provided)
         user_ids_query = db.query(User.id)
@@ -1507,10 +1629,11 @@ async def get_risk_metrics(
                 "maxDrawdown": None,
                 "volatility": None,
                 "returnPercent": 0,
+                "period": period,
                 "message": "No users found for requested risk profile" if risk_profile else "No users found"
             }
 
-        # Get portfolio snapshots for lookback period for selected users
+        # Get portfolio snapshots for the determined period for selected users
         snapshots = db.query(PortfolioSnapshot).filter(
             PortfolioSnapshot.recorded_at >= lookback_date,
             PortfolioSnapshot.user_id.in_(user_ids)
@@ -1524,6 +1647,7 @@ async def get_risk_metrics(
                 "maxDrawdown": None,
                 "volatility": None,
                 "returnPercent": 0,
+                "period": period,
                 "message": "Insufficient data for metrics"
             }
         
@@ -1546,12 +1670,13 @@ async def get_risk_metrics(
                 "maxDrawdown": None,
                 "volatility": None,
                 "returnPercent": 0,
+                "period": period,
                 "message": "Insufficient data for metrics"
             }
         
         returns_array = np.array(returns)
         
-        # Calculate metrics
+        # Calculate metrics for the specified period
         total_return_pct = ((values[-1] - values[0]) / values[0]) * 100 if values[0] > 0 else 0
         daily_volatility = np.std(returns_array)
         annual_volatility = daily_volatility * np.sqrt(252)  # Annualize
@@ -1581,7 +1706,8 @@ async def get_risk_metrics(
             "sortinoRatio": round(sortino_ratio, 2),
             "calmarRatio": round(calmar_ratio, 2),
             "maxDrawdown": round(max_drawdown, 4),
-            "lookbackDays": lookback,
+            "period": period,
+            "lookbackDays": (now - lookback_date).days,
             "snapshotCount": len(snapshots),
             "userCount": len(user_ids),
             "riskProfile": risk_profile,

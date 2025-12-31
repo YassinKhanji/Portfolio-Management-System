@@ -41,9 +41,15 @@ DATABASE_URL = os.getenv(
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,
-    max_overflow=5,
+    pool_size=5,  # Keep pool small - Railway has connection limits
+    max_overflow=10,  # Allow more overflow for burst traffic
     pool_pre_ping=True,  # Verify connections before reusing
+    pool_recycle=300,  # Recycle connections every 5 minutes to avoid stale connections
+    pool_timeout=30,  # Wait max 30 seconds for a connection
+    connect_args={
+        "connect_timeout": 10,  # Connection timeout 10 seconds
+        "options": "-c statement_timeout=30000"  # Statement timeout 30 seconds
+    }
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

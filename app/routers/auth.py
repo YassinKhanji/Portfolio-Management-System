@@ -691,12 +691,28 @@ async def snaptrade_sync_user_holdings(
 @router.get("/auth/snaptrade/holdings")
 async def snaptrade_holdings(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    """Return aggregated holdings and account balances from connected SnapTrade brokers."""
+    """Return aggregated holdings and account balances from connected SnapTrade brokers.
+    
+    IMPORTANT: This endpoint is optimized to minimize database connection time.
+    DB connections are only held during actual queries, not during slow external API calls.
+    This prevents connection pool exhaustion under load.
+    """
 
-    connections = ensure_snaptrade_connections(current_user, db)
-
+    # Step 1: Get connections using a SHORT-LIVED database session
+    # This is quick DB read/write, then release the connection
+    with SessionLocal() as db:
+        connections = ensure_snaptrade_connections(current_user, db)
+        # Extract connection data we need (copy to avoid detached instance errors)
+        connection_data = {}
+        for broker, conn in connections.items():
+            connection_data[broker] = {
+                "is_connected": conn.is_connected,
+                "snaptrade_user_id": conn.snaptrade_user_id,
+                "snaptrade_user_secret": conn.snaptrade_user_secret,
+            }
+    # DB connection is now released back to the pool
+    
     accounts_out = []
     positions_out = []
     total_value = 0.0
@@ -707,11 +723,13 @@ async def snaptrade_holdings(
     # Also collect cost basis from activities (for brokers that don't return it in holdings)
     all_cost_basis: dict[str, float] = {}
 
-    for broker, conn in connections.items():
-        if not conn.is_connected or not conn.snaptrade_user_id or not conn.snaptrade_user_secret:
+    # Step 2: Make all external API calls WITHOUT holding a DB connection
+    # These calls are SLOW (3+ seconds each) - we don't want to hold DB connections
+    for broker, conn_info in connection_data.items():
+        if not conn_info["is_connected"] or not conn_info["snaptrade_user_id"] or not conn_info["snaptrade_user_secret"]:
             continue
         try:
-            client = SnapTradeClient(conn.snaptrade_user_id, conn.snaptrade_user_secret)
+            client = SnapTradeClient(conn_info["snaptrade_user_id"], conn_info["snaptrade_user_secret"])
             accounts = client.get_accounts()
             logger.info(f"Retrieved {len(accounts)} accounts for {broker}")
             
@@ -793,8 +811,9 @@ async def snaptrade_holdings(
                         logger.info(f"=== LIVE PRICE FETCH: symbols to fetch = {crypto_symbols} ===")
                         
                         if crypto_symbols:
-                            live_prices_usd = get_live_crypto_prices(crypto_symbols)
-                            logger.info(f"=== LIVE PRICES RETURNED: {live_prices_usd} ===")
+                            # get_live_crypto_prices returns prices in CAD (uses CAD pairs or converts USD pairs)
+                            live_prices_cad = get_live_crypto_prices(crypto_symbols)
+                            logger.info(f"=== LIVE PRICES RETURNED (CAD): {live_prices_cad} ===")
                             
                             # Update holdings with live prices
                             for h in holdings:
@@ -813,13 +832,13 @@ async def snaptrade_holdings(
                                     symbol_val = str(symbol_val) if symbol_val else ""
                                 
                                 symbol_upper = symbol_val.upper()
-                                if symbol_upper in live_prices_usd:
+                                if symbol_upper in live_prices_cad:
                                     old_price = h.price
                                     old_currency = h.currency
-                                    h.price = live_prices_usd[symbol_upper]
+                                    h.price = live_prices_cad[symbol_upper]
                                     h.market_value = h.quantity * h.price
-                                    h.currency = "USD"  # Live prices are always in USD
-                                    logger.info(f"=== UPDATED {symbol_upper}: price {old_price} ({old_currency}) -> {h.price} (USD) ===")
+                                    h.currency = "CAD"  # Live prices are already in CAD
+                                    logger.info(f"=== UPDATED {symbol_upper}: price {old_price} ({old_currency}) -> {h.price} (CAD) ===")
                     except Exception as live_price_exc:
                         logger.warning(f"Failed to fetch live crypto prices: {live_price_exc}")
                         # Continue with SnapTrade prices as fallback
@@ -973,132 +992,135 @@ async def snaptrade_holdings(
     logger.info(f"Total portfolio value: {total_value}")
     logger.info(f"Total positions returned: {len(positions_out)}")
 
-    # Sync positions to the database for AUM tracking and snapshots
-    # First, get existing positions to preserve cost_basis and order tracking
-    existing_positions = {
-        p.symbol: p for p in db.query(Position).filter(Position.user_id == current_user.id).all()
-    }
-    
-    try:
-        # Delete existing positions for this user and re-insert fresh data
-        db.query(Position).filter(Position.user_id == current_user.id).delete()
+    # Step 3: Sync positions to the database using a NEW short-lived session
+    # This is the only DB-intensive operation, and it's done AFTER all external API calls
+    with SessionLocal() as db:
+        # First, get existing positions to preserve cost_basis and order tracking
+        existing_positions = {
+            p.symbol: p for p in db.query(Position).filter(Position.user_id == current_user.id).all()
+        }
         
-        for pos in positions_out:
-            symbol = pos["symbol"]
-            symbol_upper = symbol.upper()
-            existing = existing_positions.get(symbol)
+        try:
+            # Delete existing positions for this user and re-insert fresh data
+            db.query(Position).filter(Position.user_id == current_user.id).delete()
             
-            # Get order data from SnapTrade orders API (includes weighted avg buy price)
-            order_data = all_orders_by_symbol.get(symbol_upper, {})
+            for pos in positions_out:
+                symbol = pos["symbol"]
+                symbol_upper = symbol.upper()
+                existing = existing_positions.get(symbol)
+                
+                # Get order data from SnapTrade orders API (includes weighted avg buy price)
+                order_data = all_orders_by_symbol.get(symbol_upper, {})
+                
+                # Get cost_basis from multiple sources (priority order):
+                # 1. Average purchase price from SnapTrade holdings API (provided by broker)
+                # 2. Weighted average BUY price from order history
+                # 3. Cost basis calculated from activities
+                # 4. Existing position in database (preserved from previous syncs)
+                cost_basis = None
+                cost_basis_source = "none"
+                
+                # Priority 1: Average purchase price from holdings API (most reliable - directly from broker)
+                if pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
+                    cost_basis = pos["average_purchase_price"]
+                    cost_basis_source = "holdings_api"
+                    logger.info(f"P1: Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API, already in CAD)")
+                
+                # Priority 2: Weighted average buy price from order history
+                if not cost_basis:
+                    avg_buy_price = order_data.get('avg_buy_price', 0)
+                    if avg_buy_price and avg_buy_price > 0:
+                        # Order history prices from SnapTrade are in USD - convert to CAD
+                        original_currency = pos.get("original_currency", "USD")
+                        avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
+                        cost_basis = avg_buy_price
+                        cost_basis_source = "order_history"
+                        logger.info(f"P2: Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history, converted from {original_currency})")
+                
+                # Priority 3: Cost basis from activities
+                if not cost_basis:
+                    activity_cost = all_cost_basis.get(symbol_upper, 0)
+                    if activity_cost and activity_cost > 0:
+                        # Activities prices from SnapTrade are in USD - convert to CAD
+                        original_currency = pos.get("original_currency", "USD")
+                        activity_cost = convert_to_cad(activity_cost, original_currency)
+                        cost_basis = activity_cost
+                        cost_basis_source = "activities"
+                        logger.info(f"P3: Using activity-based cost_basis {cost_basis} CAD for {symbol} (converted from {original_currency})")
+                
+                # Priority 4: Existing database value
+                if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
+                    cost_basis = existing.cost_basis
+                    cost_basis_source = "database"
+                    logger.info(f"P4: Using existing DB cost_basis {cost_basis} for {symbol}")
+                
+                logger.info(f"=== COST BASIS for {symbol}: {cost_basis} from {cost_basis_source} ===")
+                
+                # Get last_order_time from order data or existing position
+                last_order_time = None
+                if order_data.get('time_placed'):
+                    last_order_time = order_data['time_placed']
+                    if isinstance(last_order_time, str):
+                        try:
+                            last_order_time = datetime.fromisoformat(last_order_time.replace('Z', '+00:00'))
+                        except ValueError:
+                            last_order_time = None
+                elif existing and existing.last_order_time:
+                    last_order_time = existing.last_order_time
+                
+                # Get last_order_side from order data or existing position
+                last_order_side = order_data.get('action') or (existing.last_order_side if existing else None) or "HOLD"
+                
+                # Calculate change from cost basis (this is the P&L percentage)
+                change_24h = 0.0
+                if cost_basis and cost_basis > 0 and pos["price"]:
+                    change_24h = ((pos["price"] - cost_basis) / cost_basis) * 100
+                    logger.info(f"=== RETURN CALC for {symbol} ===")
+                    logger.info(f"  pos['price'] = {pos['price']} (should be CAD)")
+                    logger.info(f"  cost_basis = {cost_basis} (should be CAD)")
+                    logger.info(f"  change_24h = {change_24h:.2f}%")
+                    logger.info(f"  pos['original_currency'] = {pos.get('original_currency')}")
+                    logger.info(f"  pos['average_purchase_price'] = {pos.get('average_purchase_price')}")
+                else:
+                    logger.warning(f"Cannot calculate return for {symbol}: cost_basis={cost_basis}, price={pos.get('price')}")
+                
+                # Add these fields to the position output for the API response
+                pos["cost_basis"] = cost_basis
+                pos["change_24h"] = change_24h
+                pos["last_order_time"] = last_order_time.isoformat() if last_order_time else None
+                pos["last_order_side"] = last_order_side or "HOLD"
+                
+                position = Position(
+                    id=str(uuid.uuid4()),
+                    user_id=current_user.id,
+                    symbol=symbol,
+                    quantity=float(pos["quantity"]),
+                    price=float(pos["price"]),
+                    market_value=float(pos["market_value"]),
+                    cost_basis=cost_basis,
+                    last_order_time=last_order_time,
+                    last_order_side=last_order_side,
+                    allocation_percentage=0.0,  # Will be calculated on demand
+                    target_percentage=0.0,
+                    metadata_json={
+                        "broker": pos["broker"],
+                        "account_id": pos["account_id"],
+                        "account_name": pos["account_name"],
+                        "name": pos["name"],
+                        "currency": pos.get("currency", "CAD"),
+                        "original_currency": pos.get("original_currency", "CAD"),
+                        "asset_class": pos["asset_class"],
+                    },
+                )
+                db.add(position)
             
-            # Get cost_basis from multiple sources (priority order):
-            # 1. Average purchase price from SnapTrade holdings API (provided by broker)
-            # 2. Weighted average BUY price from order history
-            # 3. Cost basis calculated from activities
-            # 4. Existing position in database (preserved from previous syncs)
-            cost_basis = None
-            cost_basis_source = "none"
-            
-            # Priority 1: Average purchase price from holdings API (most reliable - directly from broker)
-            if pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
-                cost_basis = pos["average_purchase_price"]
-                cost_basis_source = "holdings_api"
-                logger.info(f"P1: Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API, already in CAD)")
-            
-            # Priority 2: Weighted average buy price from order history
-            if not cost_basis:
-                avg_buy_price = order_data.get('avg_buy_price', 0)
-                if avg_buy_price and avg_buy_price > 0:
-                    # Order history prices from SnapTrade are in USD - convert to CAD
-                    original_currency = pos.get("original_currency", "USD")
-                    avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
-                    cost_basis = avg_buy_price
-                    cost_basis_source = "order_history"
-                    logger.info(f"P2: Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history, converted from {original_currency})")
-            
-            # Priority 3: Cost basis from activities
-            if not cost_basis:
-                activity_cost = all_cost_basis.get(symbol_upper, 0)
-                if activity_cost and activity_cost > 0:
-                    # Activities prices from SnapTrade are in USD - convert to CAD
-                    original_currency = pos.get("original_currency", "USD")
-                    activity_cost = convert_to_cad(activity_cost, original_currency)
-                    cost_basis = activity_cost
-                    cost_basis_source = "activities"
-                    logger.info(f"P3: Using activity-based cost_basis {cost_basis} CAD for {symbol} (converted from {original_currency})")
-            
-            # Priority 4: Existing database value
-            if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
-                cost_basis = existing.cost_basis
-                cost_basis_source = "database"
-                logger.info(f"P4: Using existing DB cost_basis {cost_basis} for {symbol}")
-            
-            logger.info(f"=== COST BASIS for {symbol}: {cost_basis} from {cost_basis_source} ===")
-            
-            # Get last_order_time from order data or existing position
-            last_order_time = None
-            if order_data.get('time_placed'):
-                last_order_time = order_data['time_placed']
-                if isinstance(last_order_time, str):
-                    try:
-                        last_order_time = datetime.fromisoformat(last_order_time.replace('Z', '+00:00'))
-                    except ValueError:
-                        last_order_time = None
-            elif existing and existing.last_order_time:
-                last_order_time = existing.last_order_time
-            
-            # Get last_order_side from order data or existing position
-            last_order_side = order_data.get('action') or (existing.last_order_side if existing else None) or "HOLD"
-            
-            # Calculate change from cost basis (this is the P&L percentage)
-            change_24h = 0.0
-            if cost_basis and cost_basis > 0 and pos["price"]:
-                change_24h = ((pos["price"] - cost_basis) / cost_basis) * 100
-                logger.info(f"=== RETURN CALC for {symbol} ===")
-                logger.info(f"  pos['price'] = {pos['price']} (should be CAD)")
-                logger.info(f"  cost_basis = {cost_basis} (should be CAD)")
-                logger.info(f"  change_24h = {change_24h:.2f}%")
-                logger.info(f"  pos['original_currency'] = {pos.get('original_currency')}")
-                logger.info(f"  pos['average_purchase_price'] = {pos.get('average_purchase_price')}")
-            else:
-                logger.warning(f"Cannot calculate return for {symbol}: cost_basis={cost_basis}, price={pos.get('price')}")
-            
-            # Add these fields to the position output for the API response
-            pos["cost_basis"] = cost_basis
-            pos["change_24h"] = change_24h
-            pos["last_order_time"] = last_order_time.isoformat() if last_order_time else None
-            pos["last_order_side"] = last_order_side or "HOLD"
-            
-            position = Position(
-                id=str(uuid.uuid4()),
-                user_id=current_user.id,
-                symbol=symbol,
-                quantity=float(pos["quantity"]),
-                price=float(pos["price"]),
-                market_value=float(pos["market_value"]),
-                cost_basis=cost_basis,
-                last_order_time=last_order_time,
-                last_order_side=last_order_side,
-                allocation_percentage=0.0,  # Will be calculated on demand
-                target_percentage=0.0,
-                metadata_json={
-                    "broker": pos["broker"],
-                    "account_id": pos["account_id"],
-                    "account_name": pos["account_name"],
-                    "name": pos["name"],
-                    "currency": pos.get("currency", "CAD"),
-                    "original_currency": pos.get("original_currency", "CAD"),
-                    "asset_class": pos["asset_class"],
-                },
-            )
-            db.add(position)
-        
-        db.commit()
-        logger.info(f"Synced {len(positions_out)} positions to database for user {current_user.id}")
-    except Exception as sync_error:
-        db.rollback()
-        logger.error(f"Failed to sync positions to database: {sync_error}")
-        # Don't fail the request, just log the error - holdings are still returned
+            db.commit()
+            logger.info(f"Synced {len(positions_out)} positions to database for user {current_user.id}")
+        except Exception as sync_error:
+            db.rollback()
+            logger.error(f"Failed to sync positions to database: {sync_error}")
+            # Don't fail the request, just log the error - holdings are still returned
+    # DB connection is automatically released when exiting the 'with' block
 
     return {
         "total_value": total_value,

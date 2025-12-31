@@ -17,40 +17,35 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Symbol mapping for crypto assets (SnapTrade symbols -> base asset symbol).
-# Quote currency selection is dynamic (prefer CAD markets on Kraken).
-CRYPTO_BASE_MAP: Dict[str, str] = {
-    # Kraken legacy asset codes
-    "XETH": "ETH",
-    "XXBT": "BTC",
-    "XXDG": "DOGE",
-    "XDG": "DOGE",
-    "ZUSD": "USD",
-    "ZCAD": "CAD",
-
-    # Common spot symbols
-    "ETH": "ETH",
-    "BTC": "BTC",
-    "DOGE": "DOGE",
-    "SOL": "SOL",
-    "XRP": "XRP",
-    "KSM": "KSM",
-    "ATOM": "ATOM",
-    "DOT": "DOT",
-    "MATIC": "MATIC",
-    "ADA": "ADA",
-    "LINK": "LINK",
-    "AVAX": "AVAX",
-    "LTC": "LTC",
-    "XLM": "XLM",
-    "TRX": "TRX",
-    "EGLD": "EGLD",
-
-    # Staking / derivative variants (prefer base token price)
-    "SOL03": "SOL",
-    "KSM07": "KSM",
-    "ATOM21": "ATOM",
-    "DOT28": "DOT",
+# Symbol mapping for crypto assets (SnapTrade symbols -> Kraken trading pairs)
+# Using CAD pairs where available, USD pairs as fallback
+CRYPTO_SYMBOL_MAP = {
+    # CAD pairs available on Kraken
+    "XETH": "ETH/CAD",
+    "ETH": "ETH/CAD",
+    "XXBT": "BTC/CAD",
+    "BTC": "BTC/CAD",
+    "XXDG": "DOGE/CAD",
+    "XDG": "DOGE/CAD",
+    "DOGE": "DOGE/CAD",
+    "SOL": "SOL/CAD",
+    "SOL03": "SOL/CAD",  # Staked SOL variant
+    "XRP": "XRP/CAD",
+    # USD pairs only (no CAD available) - will need conversion
+    "KSM": "KSM/USD",
+    "KSM07": "KSM/USD",  # Staked KSM variant
+    "ATOM": "ATOM/USD",
+    "ATOM21": "ATOM/USD",  # Staked ATOM variant
+    "DOT": "DOT/USD",
+    "DOT28": "DOT/USD",  # Staked DOT variant
+    "MATIC": "MATIC/USD",
+    "ADA": "ADA/USD",
+    "LINK": "LINK/USD",
+    "AVAX": "AVAX/USD",
+    "LTC": "LTC/USD",
+    "XLM": "XLM/USD",
+    "TRX": "TRX/USD",
+    "EGLD": "EGLD/USD",
 }
 
 # Cache for live prices (symbol -> (price_usd, timestamp))
@@ -145,10 +140,12 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
     """
     global _price_cache
     
+    from app.core.currency import convert_to_cad
+    
     logger.info(f"=== get_live_crypto_prices CALLED with symbols: {symbols} ===")
     
-    prices: Dict[str, float] = {}
-    symbols_to_fetch: List[tuple[str, str]] = []
+    prices = {}
+    symbols_to_fetch = []
     current_time = time.time()
     
     # Check cache first
@@ -161,16 +158,17 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
                 logger.debug(f"Using cached price for {symbol_upper}: ${cached_price}")
                 continue
         
-        # Normalize to a base symbol (handles staking variants like KSM07)
-        base_symbol = CRYPTO_BASE_MAP.get(symbol_upper)
-        if not base_symbol:
-            stripped = ''.join(c for c in symbol_upper if not c.isdigit())
-            base_symbol = CRYPTO_BASE_MAP.get(stripped) or stripped
-            if stripped != symbol_upper and base_symbol:
+        # Map to Kraken trading pair
+        kraken_pair = CRYPTO_SYMBOL_MAP.get(symbol_upper)
+        if kraken_pair:
+            symbols_to_fetch.append((symbol_upper, kraken_pair))
+        else:
+            # Try to construct pair from symbol
+            base_symbol = ''.join(c for c in symbol_upper if not c.isdigit())
+            if base_symbol != symbol_upper and base_symbol in CRYPTO_SYMBOL_MAP:
+                kraken_pair = CRYPTO_SYMBOL_MAP[base_symbol]
+                symbols_to_fetch.append((symbol_upper, kraken_pair))
                 logger.info(f"Mapped staking variant {symbol_upper} to base {base_symbol}")
-
-        # Select best quote currency dynamically after markets are loaded
-        symbols_to_fetch.append((symbol_upper, base_symbol))
     
     if not symbols_to_fetch:
         return prices
@@ -184,99 +182,46 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
             'timeout': 10000,  # 10 second timeout for price quotes
         })
         
-        exchange.load_markets()
-
-        # Use Kraken's own USD/CAD rate for conversions to match Kraken app pricing.
-        # Cache it with the same TTL as other prices.
-        fx_key = "FX_USD_CAD"
-        usd_cad_rate: Optional[float] = None
-        if fx_key in _price_cache:
-            cached_rate, cached_time = _price_cache[fx_key]
-            if current_time - cached_time < _PRICE_CACHE_TTL_SECONDS:
-                usd_cad_rate = float(cached_rate)
-
-        if usd_cad_rate is None and 'USD/CAD' in exchange.markets:
-            try:
-                fx_ticker = exchange.fetch_ticker('USD/CAD')
-                fx_price = fx_ticker.get('last') or fx_ticker.get('close') or fx_ticker.get('bid') or 0
-                if fx_price and float(fx_price) > 0:
-                    usd_cad_rate = float(fx_price)
-                    _price_cache[fx_key] = (usd_cad_rate, current_time)
-                    logger.info(f"Fetched USD/CAD rate from Kraken: {usd_cad_rate}")
-            except Exception as fx_exc:  # noqa: BLE001
-                logger.warning(f"Failed to fetch USD/CAD rate from Kraken: {fx_exc}")
-
-        def pick_pair(base: str) -> Optional[str]:
-            # Prefer CAD pricing; fallback to USD/USDT. Only choose pairs Kraken actually supports.
-            candidates = [f"{base}/CAD", f"{base}/USD", f"{base}/USDT"]
-            for candidate in candidates:
-                if candidate in exchange.markets:
-                    return candidate
-            return None
-
-        resolved: List[tuple[str, str]] = []
-        for original_symbol, base_symbol in symbols_to_fetch:
-            chosen = pick_pair(base_symbol)
-            if chosen:
-                resolved.append((original_symbol, chosen))
-            else:
-                logger.warning(f"No supported Kraken market found for {original_symbol} (base={base_symbol})")
-
-        if not resolved:
-            return prices
-
         # Fetch tickers for all symbols at once
-        unique_pairs = list(set(pair for _, pair in resolved))
+        unique_pairs = list(set(pair for _, pair in symbols_to_fetch))
         
         try:
             # Try to fetch all tickers at once
             tickers = exchange.fetch_tickers(unique_pairs)
             
-            for original_symbol, kraken_pair in resolved:
+            for original_symbol, kraken_pair in symbols_to_fetch:
                 if kraken_pair in tickers:
                     ticker = tickers[kraken_pair]
                     price = ticker.get('last') or ticker.get('close') or ticker.get('bid') or 0
                     if price > 0:
-                        quote = (kraken_pair.split('/')[-1] or '').upper()
-                        if quote == 'CAD':
+                        # Check if this is a USD pair - convert to CAD if so
+                        if kraken_pair.endswith('/USD'):
+                            price_cad = convert_to_cad(float(price), "USD")
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
+                            price = price_cad
+                        else:
+                            # Already in CAD
                             price = float(price)
                             logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
-                        else:
-                            # Treat USD/USDT as USD for FX conversion. Prefer Kraken's USD/CAD rate.
-                            if usd_cad_rate is not None:
-                                price_cad = float(price) * float(usd_cad_rate)
-                                logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} {quote} * {usd_cad_rate} = ${price_cad} CAD")
-                                price = price_cad
-                            else:
-                                from app.core.currency import convert_to_cad
-                                price_cad = convert_to_cad(float(price), "USD")
-                                logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} {quote} -> ${price_cad} CAD (fallback FX)")
-                                price = price_cad
                         
                         prices[original_symbol] = price
                         _price_cache[original_symbol] = (price, current_time)
         except Exception as e:
             logger.warning(f"Batch ticker fetch failed, trying individual: {e}")
             # Fallback: fetch individually
-            for original_symbol, kraken_pair in resolved:
+            for original_symbol, kraken_pair in symbols_to_fetch:
                 try:
                     ticker = exchange.fetch_ticker(kraken_pair)
                     price = ticker.get('last') or ticker.get('close') or ticker.get('bid') or 0
                     if price > 0:
-                        quote = (kraken_pair.split('/')[-1] or '').upper()
-                        if quote == 'CAD':
+                        # Check if this is a USD pair - convert to CAD if so
+                        if kraken_pair.endswith('/USD'):
+                            price_cad = convert_to_cad(float(price), "USD")
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
+                            price = price_cad
+                        else:
                             price = float(price)
                             logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
-                        else:
-                            if usd_cad_rate is not None:
-                                price_cad = float(price) * float(usd_cad_rate)
-                                logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} {quote} * {usd_cad_rate} = ${price_cad} CAD")
-                                price = price_cad
-                            else:
-                                from app.core.currency import convert_to_cad
-                                price_cad = convert_to_cad(float(price), "USD")
-                                logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} {quote} -> ${price_cad} CAD (fallback FX)")
-                                price = price_cad
                         
                         prices[original_symbol] = price
                         _price_cache[original_symbol] = (price, current_time)
