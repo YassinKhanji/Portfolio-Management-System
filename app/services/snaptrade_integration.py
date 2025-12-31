@@ -559,14 +559,14 @@ class SnapTradeClient:
                     market_value = quantity * price
                     logger.info(f"Calculated market_value: {quantity} * {price} = {market_value}")
                 
-                # Parse currency
+                # Parse currency - SnapTrade typically reports crypto in USD
                 currency_data = position.get("currency", {})
                 if isinstance(currency_data, str):
                     currency = currency_data
                 elif isinstance(currency_data, dict):
-                    currency = currency_data.get("code", "CAD") or currency_data.get("id", "CAD")
+                    currency = currency_data.get("code", "USD") or currency_data.get("id", "USD")
                 else:
-                    currency = "CAD"
+                    currency = "USD"  # Default to USD for crypto exchanges
                 
                 # Get average_purchase_price for cost basis - check multiple possible fields/locations
                 avg_price_raw = (

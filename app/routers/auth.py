@@ -815,6 +815,7 @@ async def snaptrade_holdings(
                                     old_price = h.price
                                     h.price = live_prices_usd[symbol_upper]
                                     h.market_value = h.quantity * h.price
+                                    h.currency = "USD"  # Live prices are always in USD
                                     logger.info(f"Updated {symbol_upper} price from {old_price} to {h.price} USD (live)")
                     except Exception as live_price_exc:
                         logger.warning(f"Failed to fetch live crypto prices: {live_price_exc}")
