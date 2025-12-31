@@ -18,29 +18,34 @@ import time
 logger = logging.getLogger(__name__)
 
 # Symbol mapping for crypto assets (SnapTrade symbols -> Kraken trading pairs)
+# Using CAD pairs where available, USD pairs as fallback
 CRYPTO_SYMBOL_MAP = {
-    "XETH": "ETH/USD",
-    "ETH": "ETH/USD",
-    "XXBT": "BTC/USD",
-    "BTC": "BTC/USD",
-    "XXDG": "DOGE/USD",
-    "XDG": "DOGE/USD",
-    "DOGE": "DOGE/USD",
+    # CAD pairs available on Kraken
+    "XETH": "ETH/CAD",
+    "ETH": "ETH/CAD",
+    "XXBT": "BTC/CAD",
+    "BTC": "BTC/CAD",
+    "XXDG": "DOGE/CAD",
+    "XDG": "DOGE/CAD",
+    "DOGE": "DOGE/CAD",
+    "SOL": "SOL/CAD",
+    "SOL03": "SOL/CAD",  # Staked SOL variant
+    "XRP": "XRP/CAD",
+    # USD pairs only (no CAD available) - will need conversion
     "KSM": "KSM/USD",
     "KSM07": "KSM/USD",  # Staked KSM variant
     "ATOM": "ATOM/USD",
     "ATOM21": "ATOM/USD",  # Staked ATOM variant
-    "SOL": "SOL/USD",
-    "SOL03": "SOL/USD",  # Staked SOL variant
     "DOT": "DOT/USD",
     "DOT28": "DOT/USD",  # Staked DOT variant
     "MATIC": "MATIC/USD",
-    "XRP": "XRP/USD",
     "ADA": "ADA/USD",
     "LINK": "LINK/USD",
     "AVAX": "AVAX/USD",
     "LTC": "LTC/USD",
     "XLM": "XLM/USD",
+    "TRX": "TRX/USD",
+    "EGLD": "EGLD/USD",
 }
 
 # Cache for live prices (symbol -> (price_usd, timestamp))
@@ -125,15 +130,19 @@ class MarketDataService:
 def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
     """
     Fetch live cryptocurrency prices from Kraken via CCXT.
-    Prices are returned in USD.
+    Prices are returned in CAD (using CAD pairs where available, converting USD pairs).
     
     Args:
         symbols: List of crypto symbols (e.g., ["XETH", "XXDG", "KSM07"])
         
     Returns:
-        Dict mapping symbols to their current USD prices
+        Dict mapping symbols to their current CAD prices
     """
     global _price_cache
+    
+    from app.core.currency import convert_to_cad
+    
+    logger.info(f"=== get_live_crypto_prices CALLED with symbols: {symbols} ===")
     
     prices = {}
     symbols_to_fetch = []
@@ -185,9 +194,18 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
                     ticker = tickers[kraken_pair]
                     price = ticker.get('last') or ticker.get('close') or ticker.get('bid') or 0
                     if price > 0:
-                        prices[original_symbol] = float(price)
-                        _price_cache[original_symbol] = (float(price), current_time)
-                        logger.info(f"Fetched live price for {original_symbol}: ${price}")
+                        # Check if this is a USD pair - convert to CAD if so
+                        if kraken_pair.endswith('/USD'):
+                            price_cad = convert_to_cad(float(price), "USD")
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
+                            price = price_cad
+                        else:
+                            # Already in CAD
+                            price = float(price)
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
+                        
+                        prices[original_symbol] = price
+                        _price_cache[original_symbol] = (price, current_time)
         except Exception as e:
             logger.warning(f"Batch ticker fetch failed, trying individual: {e}")
             # Fallback: fetch individually
@@ -196,9 +214,17 @@ def get_live_crypto_prices(symbols: List[str]) -> Dict[str, float]:
                     ticker = exchange.fetch_ticker(kraken_pair)
                     price = ticker.get('last') or ticker.get('close') or ticker.get('bid') or 0
                     if price > 0:
-                        prices[original_symbol] = float(price)
-                        _price_cache[original_symbol] = (float(price), current_time)
-                        logger.info(f"Fetched live price for {original_symbol}: ${price}")
+                        # Check if this is a USD pair - convert to CAD if so
+                        if kraken_pair.endswith('/USD'):
+                            price_cad = convert_to_cad(float(price), "USD")
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} USD = ${price_cad} CAD")
+                            price = price_cad
+                        else:
+                            price = float(price)
+                            logger.info(f"Fetched {original_symbol} ({kraken_pair}): ${price} CAD")
+                        
+                        prices[original_symbol] = price
+                        _price_cache[original_symbol] = (price, current_time)
                 except Exception as inner_e:
                     logger.warning(f"Failed to fetch price for {original_symbol} ({kraken_pair}): {inner_e}")
                     

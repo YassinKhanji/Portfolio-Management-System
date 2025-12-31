@@ -155,7 +155,7 @@ def convert_to_cad(amount: float, from_currency: str = "USD") -> float:
         from_currency: Source currency code (default: USD)
     
     Returns:
-        float: Amount converted to CAD
+        float: Amount converted to CAD (full precision, no rounding)
     """
     if amount is None or amount == 0:
         return 0.0
@@ -169,7 +169,8 @@ def convert_to_cad(amount: float, from_currency: str = "USD") -> float:
     rate = _get_exchange_rate(from_currency)
     converted = float(amount) * rate
     
-    return round(converted, 2)
+    # Return full precision - rounding should only happen at display time
+    return converted
 
 
 def convert_from_cad(amount: float, to_currency: str = "USD") -> float:

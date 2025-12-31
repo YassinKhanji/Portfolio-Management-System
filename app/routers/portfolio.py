@@ -1069,12 +1069,12 @@ async def get_portfolio_positions(
                 if symbol_upper not in {"USDC", "USDT", "DAI", "USD", "CAD", "EUR", "GBP"}:
                     crypto_symbols.append(pos.symbol)
         
-        # Fetch live prices for crypto assets
-        live_prices_usd = {}
+        # Fetch live prices for crypto assets (prices are in CAD)
+        live_prices_cad = {}
         if crypto_symbols:
             try:
-                live_prices_usd = get_live_crypto_prices(crypto_symbols)
-                logger.info(f"Fetched live prices for {len(live_prices_usd)} crypto assets")
+                live_prices_cad = get_live_crypto_prices(crypto_symbols)
+                logger.info(f"Fetched live CAD prices for {len(live_prices_cad)} crypto assets")
             except Exception as e:
                 logger.warning(f"Failed to fetch live crypto prices: {e}")
         
@@ -1089,12 +1089,12 @@ async def get_portfolio_positions(
             market_value = pos.market_value
             symbol_upper = pos.symbol.upper()
             
-            if symbol_upper in live_prices_usd:
-                # Live price is in USD - convert to CAD
-                live_price_usd = live_prices_usd[symbol_upper]
-                current_price = convert_to_cad(live_price_usd, "USD")
+            if symbol_upper in live_prices_cad:
+                # Live price is already in CAD from CCXT (using CAD trading pairs)
+                live_price_cad = live_prices_cad[symbol_upper]
+                current_price = live_price_cad
                 market_value = pos.quantity * current_price
-                logger.info(f"Using live price for {pos.symbol}: ${live_price_usd} USD = ${current_price} CAD")
+                logger.info(f"Using live price for {pos.symbol}: ${current_price} CAD")
             
             # Calculate change percentage from cost basis using live price
             change_pct = 0.0

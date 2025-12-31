@@ -196,7 +196,7 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
         for symbol, holding_data in all_holdings.items():
             allocation_pct = (holding_data['market_value'] / total_value * 100) if total_value > 0 else 0
             
-            # Get cost basis from average_purchase_price
+            # Get cost basis from average_purchase_price (already converted to CAD)
             symbol_cost_basis = holding_data.get('average_purchase_price', 0) or None
             
             # If no cost basis from holdings, try to calculate from order data
@@ -204,6 +204,8 @@ def sync_user_holdings_sync(user_id: str, db) -> Dict[str, any]:
             if not symbol_cost_basis and last_order:
                 order_price = last_order.get('price')
                 if order_price and order_price > 0:
+                    # Order prices from SnapTrade are already in the account's currency (CAD for Kraken)
+                    # No conversion needed - use the price as-is
                     symbol_cost_basis = order_price
                     logger.debug(f"Using order price {order_price} as cost basis for {symbol}")
             

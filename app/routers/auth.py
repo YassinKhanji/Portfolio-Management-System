@@ -790,9 +790,11 @@ async def snaptrade_holdings(
                             if symbol_upper not in {"USDC", "USDT", "DAI", "USD", "CAD", "EUR"}:
                                 crypto_symbols.append(symbol_val)
                         
+                        logger.info(f"=== LIVE PRICE FETCH: symbols to fetch = {crypto_symbols} ===")
+                        
                         if crypto_symbols:
                             live_prices_usd = get_live_crypto_prices(crypto_symbols)
-                            logger.info(f"Fetched live prices for {len(live_prices_usd)} crypto assets: {live_prices_usd}")
+                            logger.info(f"=== LIVE PRICES RETURNED: {live_prices_usd} ===")
                             
                             # Update holdings with live prices
                             for h in holdings:
@@ -813,10 +815,11 @@ async def snaptrade_holdings(
                                 symbol_upper = symbol_val.upper()
                                 if symbol_upper in live_prices_usd:
                                     old_price = h.price
+                                    old_currency = h.currency
                                     h.price = live_prices_usd[symbol_upper]
                                     h.market_value = h.quantity * h.price
                                     h.currency = "USD"  # Live prices are always in USD
-                                    logger.info(f"Updated {symbol_upper} price from {old_price} to {h.price} USD (live)")
+                                    logger.info(f"=== UPDATED {symbol_upper}: price {old_price} ({old_currency}) -> {h.price} (USD) ===")
                     except Exception as live_price_exc:
                         logger.warning(f"Failed to fetch live crypto prices: {live_price_exc}")
                         # Continue with SnapTrade prices as fallback
@@ -994,11 +997,13 @@ async def snaptrade_holdings(
             # 3. Cost basis calculated from activities
             # 4. Existing position in database (preserved from previous syncs)
             cost_basis = None
+            cost_basis_source = "none"
             
             # Priority 1: Average purchase price from holdings API (most reliable - directly from broker)
             if pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
                 cost_basis = pos["average_purchase_price"]
-                logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API, already in CAD)")
+                cost_basis_source = "holdings_api"
+                logger.info(f"P1: Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API, already in CAD)")
             
             # Priority 2: Weighted average buy price from order history
             if not cost_basis:
@@ -1008,7 +1013,8 @@ async def snaptrade_holdings(
                     original_currency = pos.get("original_currency", "USD")
                     avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
                     cost_basis = avg_buy_price
-                    logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history, converted from {original_currency})")
+                    cost_basis_source = "order_history"
+                    logger.info(f"P2: Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history, converted from {original_currency})")
             
             # Priority 3: Cost basis from activities
             if not cost_basis:
@@ -1018,12 +1024,16 @@ async def snaptrade_holdings(
                     original_currency = pos.get("original_currency", "USD")
                     activity_cost = convert_to_cad(activity_cost, original_currency)
                     cost_basis = activity_cost
-                    logger.info(f"Using activity-based cost_basis {cost_basis} CAD for {symbol} (converted from {original_currency})")
+                    cost_basis_source = "activities"
+                    logger.info(f"P3: Using activity-based cost_basis {cost_basis} CAD for {symbol} (converted from {original_currency})")
             
             # Priority 4: Existing database value
             if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
                 cost_basis = existing.cost_basis
-                logger.info(f"Using existing DB cost_basis {cost_basis} for {symbol}")
+                cost_basis_source = "database"
+                logger.info(f"P4: Using existing DB cost_basis {cost_basis} for {symbol}")
+            
+            logger.info(f"=== COST BASIS for {symbol}: {cost_basis} from {cost_basis_source} ===")
             
             # Get last_order_time from order data or existing position
             last_order_time = None
@@ -1044,7 +1054,12 @@ async def snaptrade_holdings(
             change_24h = 0.0
             if cost_basis and cost_basis > 0 and pos["price"]:
                 change_24h = ((pos["price"] - cost_basis) / cost_basis) * 100
-                logger.info(f"Calculated return for {symbol}: current_price={pos['price']:.6f}, cost_basis={cost_basis:.6f}, return={change_24h:.2f}%")
+                logger.info(f"=== RETURN CALC for {symbol} ===")
+                logger.info(f"  pos['price'] = {pos['price']} (should be CAD)")
+                logger.info(f"  cost_basis = {cost_basis} (should be CAD)")
+                logger.info(f"  change_24h = {change_24h:.2f}%")
+                logger.info(f"  pos['original_currency'] = {pos.get('original_currency')}")
+                logger.info(f"  pos['average_purchase_price'] = {pos.get('average_purchase_price')}")
             else:
                 logger.warning(f"Cannot calculate return for {symbol}: cost_basis={cost_basis}, price={pos.get('price')}")
             
