@@ -504,7 +504,8 @@ class SnapTradeClient:
                     symbol_prices[symbol_str.upper()] = price
             
             for position in positions_list:
-                # Log raw position for debugging
+                # Log raw position keys for debugging
+                logger.info(f"Raw position keys: {position.keys() if isinstance(position, dict) else 'not a dict'}")
                 logger.info(f"Raw position data: {position}")
                 
                 # Handle deeply nested symbol structure from SnapTrade
@@ -567,9 +568,26 @@ class SnapTradeClient:
                 else:
                     currency = "CAD"
                 
-                # Also check for average_purchase_price for cost basis
-                avg_price_raw = position.get("average_purchase_price", 0) or position.get("average_cost", 0)
+                # Get average_purchase_price for cost basis - check multiple possible fields/locations
+                avg_price_raw = (
+                    position.get("average_purchase_price") or 
+                    position.get("average_cost") or
+                    position.get("book_value_per_unit") or
+                    position.get("avg_cost") or
+                    position.get("cost_per_share") or
+                    0
+                )
+                
+                # Also check if it's nested inside symbol data
+                if not avg_price_raw and isinstance(symbol_data, dict):
+                    avg_price_raw = (
+                        symbol_data.get("average_purchase_price") or
+                        symbol_data.get("average_cost") or
+                        0
+                    )
+                
                 avg_price = _to_float(avg_price_raw, "average_purchase_price")
+                logger.info(f"Symbol {symbol_str}: avg_price_raw={avg_price_raw}, parsed avg_price={avg_price}")
                 
                 # Final price - use market price if available, otherwise average
                 final_price = price if price > 0 else avg_price

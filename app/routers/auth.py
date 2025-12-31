@@ -703,6 +703,8 @@ async def snaptrade_holdings(
     
     # Collect order data for all connections to get cost basis and order times
     all_orders_by_symbol: dict[str, dict] = {}
+    # Also collect cost basis from activities (for brokers that don't return it in holdings)
+    all_cost_basis: dict[str, float] = {}
 
     for broker, conn in connections.items():
         if not conn.is_connected or not conn.snaptrade_user_id or not conn.snaptrade_user_secret:
@@ -728,6 +730,18 @@ async def snaptrade_holdings(
                 logger.info(f"Fetched order history for {len(orders_by_symbol)} symbols from {broker}")
             except Exception as order_exc:
                 logger.warning(f"Could not fetch order history from {broker}: {order_exc}")
+            
+            # Also fetch activities to calculate cost basis (fallback method)
+            try:
+                activities = client.get_all_account_activities()
+                cost_basis_from_activities = client.calculate_cost_basis(activities)
+                for symbol, cost in cost_basis_from_activities.items():
+                    symbol_upper = symbol.upper()
+                    if symbol_upper not in all_cost_basis:
+                        all_cost_basis[symbol_upper] = cost
+                logger.info(f"Calculated cost basis from activities for {len(cost_basis_from_activities)} symbols from {broker}")
+            except Exception as activity_exc:
+                logger.warning(f"Could not fetch activities from {broker}: {activity_exc}")
                 
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{broker}: {exc}")
@@ -907,27 +921,40 @@ async def snaptrade_holdings(
             order_data = all_orders_by_symbol.get(symbol_upper, {})
             
             # Get cost_basis from multiple sources (priority order):
-            # 1. Weighted average BUY price from order history (most accurate)
-            # 2. Average purchase price from SnapTrade holdings API
-            # 3. Existing position in database (preserved from previous syncs)
+            # 1. Average purchase price from SnapTrade holdings API (provided by broker)
+            # 2. Weighted average BUY price from order history
+            # 3. Cost basis calculated from activities
+            # 4. Existing position in database (preserved from previous syncs)
             cost_basis = None
             
-            # Priority 1: Weighted average buy price from order history
-            avg_buy_price = order_data.get('avg_buy_price', 0)
-            if avg_buy_price and avg_buy_price > 0:
-                # Convert to CAD if needed
-                original_currency = pos.get("original_currency", "CAD")
-                if original_currency.upper() != "CAD":
-                    avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
-                cost_basis = avg_buy_price
-                logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history)")
-            
-            # Priority 2: Average purchase price from holdings API
-            if not cost_basis and pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
+            # Priority 1: Average purchase price from holdings API (most reliable - directly from broker)
+            if pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
                 cost_basis = pos["average_purchase_price"]
                 logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API)")
             
-            # Priority 3: Existing database value
+            # Priority 2: Weighted average buy price from order history
+            if not cost_basis:
+                avg_buy_price = order_data.get('avg_buy_price', 0)
+                if avg_buy_price and avg_buy_price > 0:
+                    # Convert to CAD if needed
+                    original_currency = pos.get("original_currency", "CAD")
+                    if original_currency.upper() != "CAD":
+                        avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
+                    cost_basis = avg_buy_price
+                    logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history)")
+            
+            # Priority 3: Cost basis from activities
+            if not cost_basis:
+                activity_cost = all_cost_basis.get(symbol_upper, 0)
+                if activity_cost and activity_cost > 0:
+                    # Convert to CAD if needed
+                    original_currency = pos.get("original_currency", "CAD")
+                    if original_currency.upper() != "CAD":
+                        activity_cost = convert_to_cad(activity_cost, original_currency)
+                    cost_basis = activity_cost
+                    logger.info(f"Using activity-based cost_basis {cost_basis} CAD for {symbol}")
+            
+            # Priority 4: Existing database value
             if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
                 cost_basis = existing.cost_basis
                 logger.info(f"Using existing DB cost_basis {cost_basis} for {symbol}")
