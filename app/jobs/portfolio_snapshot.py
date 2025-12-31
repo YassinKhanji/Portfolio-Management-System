@@ -33,10 +33,15 @@ async def create_snapshots():
     db = SessionLocal()
     try:
         # Get all users with positions (active portfolios)
+        # Use subquery to avoid DISTINCT on JSON column (PostgreSQL issue)
+        user_ids_with_positions = (
+            db.query(Position.user_id)
+            .distinct()
+            .subquery()
+        )
         users_with_positions = (
             db.query(User)
-            .join(Position, Position.user_id == User.id)
-            .distinct()
+            .filter(User.id.in_(db.query(user_ids_with_positions.c.user_id)))
             .all()
         )
         
@@ -283,7 +288,8 @@ def _create_benchmark_snapshot(db, session: PerformanceSession) -> Optional[Benc
         if not benchmark_data:
             return None
         
-        latest = benchmark_data[0] if benchmark_data else None
+        # Data is in chronological order (oldest first), so use [-1] to get the latest
+        latest = benchmark_data[-1] if benchmark_data else None
         if not latest:
             return None
         

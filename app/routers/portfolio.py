@@ -562,14 +562,33 @@ async def get_portfolio_health_metrics(
             }
 
         # Aggregate portfolio value per day, respecting user creation dates
-        by_day: dict = {}
+        # For each user and day, take the latest snapshot value (not sum)
+        # Structure: {day: {user_id: (timestamp, value)}}
+        by_day_user: dict = {}
         for snap in snapshots:
             snap_recorded = _ensure_aware(snap.recorded_at)
             created_at = created_map.get(snap.user_id, snap_recorded)
             if snap_recorded < created_at:
                 continue
             day = snap_recorded.date()
-            by_day[day] = by_day.get(day, 0.0) + float(snap.total_value or 0.0)
+            user_id = snap.user_id
+            
+            if day not in by_day_user:
+                by_day_user[day] = {}
+            
+            # Keep only the latest snapshot per user per day
+            existing = by_day_user[day].get(user_id)
+            if existing is None or snap_recorded > existing[0]:
+                by_day_user[day][user_id] = (snap_recorded, float(snap.total_value or 0.0))
+        
+        # Now aggregate: sum latest values across users for each day
+        by_day: dict = {}
+        for day, user_values in by_day_user.items():
+            by_day[day] = sum(val for _, val in user_values.values())
+
+        # Note: Monthly returns are calculated from snapshot data only.
+        # For real-time performance, use the live-returns endpoint and PerformanceChart.
+        # Snapshots are recorded every 4 hours and track normalized growth (1.0 = baseline).
 
         if not by_day:
             return {
@@ -629,6 +648,7 @@ async def get_portfolio_health_metrics(
         sharpe_ratio = None
         annual_volatility_pct = None
         max_drawdown_pct = None
+        beta = None
 
         if np and len(snapshots) >= 2:
             values = [s.total_value for s in snapshots]
@@ -656,12 +676,39 @@ async def get_portfolio_health_metrics(
                 if len(drawdown) > 0:
                     max_drawdown_pct = round(float(np.min(drawdown) * 100), 2)
 
+                # Calculate Beta if benchmark data available
+                if benchmark_map and len(benchmark_map) > 1:
+                    # Build aligned benchmark returns
+                    benchmark_returns = []
+                    for i in range(1, len(sorted_days)):
+                        prev_day = sorted_days[i-1]
+                        curr_day = sorted_days[i]
+                        prev_bench = benchmark_map.get(prev_day)
+                        curr_bench = benchmark_map.get(curr_day)
+                        if prev_bench and curr_bench and prev_bench != 0:
+                            benchmark_returns.append((curr_bench - prev_bench) / prev_bench)
+                        else:
+                            benchmark_returns.append(0.0)
+                    
+                    # Align portfolio and benchmark returns
+                    min_len = min(len(returns), len(benchmark_returns))
+                    if min_len >= 2:
+                        port_ret = np.array(returns[:min_len])
+                        bench_ret = np.array(benchmark_returns[:min_len])
+                        
+                        # Beta = Cov(portfolio, benchmark) / Var(benchmark)
+                        if np.var(bench_ret) > 0:
+                            beta = round(float(np.cov(port_ret, bench_ret)[0, 1] / np.var(bench_ret)), 2)
+
         # Asset-class contribution using current positions
         positions = db.query(Position).filter(Position.user_id.in_(user_ids)).all()
         total_value_positions = sum(p.market_value or 0.0 for p in positions) or 0.0
 
         def infer_type(pos: Position) -> str:
+            """Infer asset type from position metadata or symbol."""
             meta = pos.metadata_json or {}
+            
+            # First check metadata for explicit asset_class
             candidate = (meta.get("asset_class") or meta.get("assetClass") or meta.get("class") or "").lower()
             if candidate:
                 if "crypto" in candidate:
@@ -672,10 +719,49 @@ async def get_portfolio_health_metrics(
                     return "Cash"
 
             symbol = (pos.symbol or "").upper()
-            if symbol in {"USD", "USDC", "USDT", "CAD", "EUR"}:
+            
+            # Cash/Fiat currencies
+            cash_symbols = {"USD", "USDC", "USDT", "CAD", "EUR", "GBP", "JPY", "AUD", "CHF", 
+                           "ZUSD", "ZCAD", "ZEUR", "ZGBP", "ZJPY"}
+            if symbol in cash_symbols:
                 return "Cash"
-            if symbol in {"BTC", "ETH", "SOL", "AVAX", "BNB", "LTC", "ADA"}:
+            
+            # Crypto assets (including Kraken-style symbols like XXBT, XETH, XXDG)
+            crypto_symbols = {
+                # Standard symbols
+                "BTC", "ETH", "SOL", "AVAX", "BNB", "LTC", "ADA", "XRP", "DOT", "LINK",
+                "ATOM", "MATIC", "UNI", "AAVE", "DOGE", "SHIB", "TRX", "XLM", "ALGO",
+                "NEAR", "FTM", "SAND", "MANA", "AXS", "CRV", "SNX", "COMP", "MKR",
+                "YFI", "SUSHI", "ENJ", "BAT", "ZRX", "KNC", "EGLD", "KSM", "FIL",
+                "THETA", "VET", "EOS", "XTZ", "WAVES", "DASH", "ZEC", "XMR", "FLOW",
+                "HBAR", "ICP", "GRT", "1INCH", "RUNE", "LUNA", "LUNC", "APE", "GMT",
+                # Kraken-style symbols (X prefix for crypto, Z prefix for fiat)
+                "XXBT", "XETH", "XLTC", "XXRP", "XDOGE", "XXDG", "XSOL", "XADA",
+                "XDOT", "XLINK", "XATOM", "XMATIC", "XXLM", "XALGO", "XAVAX",
+                # Staking/wrapped variants
+                "WBTC", "WETH", "STETH", "RETH", "CBETH",
+                # Kraken staking symbols
+                "KSM07", "DOT28", "ETH2",
+            }
+            
+            # Check if symbol matches or starts with crypto prefix
+            if symbol in crypto_symbols:
                 return "Crypto"
+            
+            # Check for Kraken X-prefix pattern (XETH, XXBT, etc.)
+            if symbol.startswith("X") and len(symbol) >= 3:
+                # Strip X prefix and check again
+                base_symbol = symbol[1:] if symbol.startswith("XX") else symbol[1:]
+                if base_symbol in crypto_symbols or len(base_symbol) <= 4:
+                    return "Crypto"
+            
+            # Check for common crypto patterns in symbol
+            crypto_patterns = ["BTC", "ETH", "SOL", "DOT", "ADA", "DOGE", "XRP"]
+            for pattern in crypto_patterns:
+                if pattern in symbol:
+                    return "Crypto"
+            
+            # Default to Equities for stocks/ETFs
             return "Equities"
 
         buckets: dict = {}
@@ -693,6 +779,14 @@ async def get_portfolio_health_metrics(
                     "name": asset_type,
                     "return": contribution,
                     "risk": "N/A",
+                    # Calculation details for tooltip
+                    "calculation": {
+                        "asset_value": round(val, 2),
+                        "total_portfolio": round(total_value_positions, 2),
+                        "weight": round(weight * 100, 2),
+                        "total_return": round(total_return_pct, 2),
+                        "formula": f"{round(total_return_pct, 2)}% × {round(weight * 100, 1)}% = {contribution}%"
+                    }
                 })
 
             asset_performance = sorted(asset_performance, key=lambda x: x["return"], reverse=True)
@@ -701,6 +795,26 @@ async def get_portfolio_health_metrics(
             if val is None:
                 return "N/A"
             return f"{val:+.2f}%"
+
+        # Determine Beta status
+        beta_value = "N/A" if beta is None else f"{beta:.2f}"
+        if beta is None:
+            if not benchmark_map or len(benchmark_map) < 2:
+                beta_subtitle = "Benchmark data not available"
+            else:
+                beta_subtitle = "Insufficient portfolio data"
+        else:
+            beta_subtitle = "Market sensitivity"
+
+        # Determine Sharpe status
+        sharpe_value = "N/A" if sharpe_ratio is None else f"{sharpe_ratio:.2f}"
+        if sharpe_ratio is None:
+            if len(snapshots) < 3:
+                sharpe_subtitle = f"Need more data ({len(snapshots)}/3 snapshots)"
+            else:
+                sharpe_subtitle = "Insufficient return variance"
+        else:
+            sharpe_subtitle = "Risk-adjusted return"
 
         kpis = [
             {
@@ -712,15 +826,15 @@ async def get_portfolio_health_metrics(
             },
             {
                 "title": "Beta",
-                "value": "N/A",
-                "subtitle": "Benchmark data not available",
+                "value": beta_value,
+                "subtitle": beta_subtitle,
                 "icon": "ssid_chart",
                 "color": "text-blue-400",
             },
             {
                 "title": "Sharpe Ratio",
-                "value": "N/A" if sharpe_ratio is None else f"{sharpe_ratio:.2f}",
-                "subtitle": "Risk-adjusted return",
+                "value": sharpe_value,
+                "subtitle": sharpe_subtitle,
                 "icon": "balance",
                 "color": "text-purple-400",
             },
@@ -1445,25 +1559,28 @@ async def get_live_portfolio_returns(
             PortfolioSnapshot.recorded_at >= _strip_tz(earliest_created)
         ).order_by(PortfolioSnapshot.recorded_at).all()
         
-        # Aggregate by timestamp (hourly buckets for granularity)
+        # Aggregate by timestamp (4-hour buckets for performance)
         buckets: dict = {}
         for snap in snapshots:
             snap_recorded = _ensure_tz(snap.recorded_at)
             created_at = created_map.get(snap.user_id, snap_recorded)
             if snap_recorded < created_at:
                 continue
-            # Use hourly buckets for finer granularity
-            key_dt = snap_recorded.replace(minute=0, second=0, microsecond=0)
+            # Use 4-hour buckets for better performance (matches snapshot frequency)
+            hour_bucket = (snap_recorded.hour // 4) * 4  # Round down to nearest 4-hour mark
+            key_dt = snap_recorded.replace(hour=hour_bucket, minute=0, second=0, microsecond=0)
             buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
         
-        # Get current live value from Position table
+        # Get current live value from Position table for real-time updates between snapshots
         current_total = db.query(func.coalesce(func.sum(Position.market_value), 0)).filter(
             Position.user_id.in_(user_ids)
         ).scalar() or 0.0
         
-        # Add current timestamp bucket
-        current_bucket = now.replace(minute=0, second=0, microsecond=0)
-        if current_bucket not in buckets or current_total > 0:
+        # Add current timestamp bucket with live Position value
+        current_hour_bucket = (now.hour // 4) * 4
+        current_bucket = now.replace(hour=current_hour_bucket, minute=0, second=0, microsecond=0)
+        if current_total > 0:
+            # Use live value for current bucket (overwrites snapshot if same bucket)
             buckets[current_bucket] = current_total
         
         if not buckets:
@@ -1478,7 +1595,7 @@ async def get_live_portfolio_returns(
         base_value = buckets[sorted_keys[0]] if buckets[sorted_keys[0]] > 0 else 1.0
         
         # Convert to percentage returns (starting from 0%)
-        # This is equivalent to tracking growth of $1 invested
+        # All values are now actual dollar amounts from snapshots
         data = []
         for key_dt in sorted_keys:
             value = buckets[key_dt]
@@ -1490,18 +1607,8 @@ async def get_live_portfolio_returns(
                 "value": round(value, 2),
             })
         
-        # Ensure we have a "now" point with current Position values
-        last_point = data[-1] if data else None
+        # Current return is based on live Position value
         current_return = ((current_total - base_value) / base_value) * 100 if base_value > 0 else 0.0
-        
-        # Add live point if it's different from last historical point
-        if last_point and abs(current_return - last_point["return_pct"]) > 0.001:
-            data.append({
-                "timestamp": _to_iso(now),
-                "return_pct": round(current_return, 4),
-                "value": round(current_total, 2),
-                "is_live": True,
-            })
         
         return {
             "data": data,

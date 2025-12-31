@@ -73,6 +73,7 @@ def create_admin_user(
     email = (payload.get("email") or "").strip().lower()
     full_name = (payload.get("full_name") or payload.get("name") or "").strip()
     # Generate secure random password if not provided
+
     password = payload.get("password") or secrets.token_urlsafe(16)
 
     if not email:
@@ -367,4 +368,41 @@ def sync_all_holdings_now(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Holdings sync failed: {str(e)}"
+        )
+
+
+@router.post("/jobs/snapshot/trigger")
+async def trigger_snapshot_job(
+    request: Request,
+    _: User = Depends(require_owner),
+    db: Session = Depends(get_db)
+):
+    """Manually trigger a portfolio snapshot for all users."""
+    from app.jobs.portfolio_snapshot import create_snapshots
+    
+    audit_admin_action(
+        action=AuditAction.ADMIN_TRIGGER_JOB,
+        admin_user=_,
+        details={"job": "portfolio_snapshot"},
+        request=request,
+        db_session=db,
+    )
+    
+    try:
+        await create_snapshots()
+        
+        # Count snapshots to report
+        from app.models.database import PortfolioSnapshot
+        count = db.query(PortfolioSnapshot).count()
+        
+        return {
+            "message": "Portfolio snapshot job completed",
+            "total_snapshots": count
+        }
+        
+    except Exception as e:
+        logger.error(f"Snapshot job failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Snapshot job failed: {str(e)}"
         )
