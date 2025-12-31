@@ -691,12 +691,17 @@ async def snaptrade_sync_user_holdings(
 @router.get("/auth/snaptrade/holdings")
 async def snaptrade_holdings(
     current_user: User = Depends(get_current_user),
+    include_cost_basis: bool = False,
 ):
     """Return aggregated holdings and account balances from connected SnapTrade brokers.
     
     IMPORTANT: This endpoint is optimized to minimize database connection time.
     DB connections are only held during actual queries, not during slow external API calls.
     This prevents connection pool exhaustion under load.
+    
+    Args:
+        include_cost_basis: If False (default), skip expensive order history and activity
+                           fetches for faster loading. Set to True to include cost basis data.
     """
 
     # Step 1: Get connections using a SHORT-LIVED database session
@@ -733,34 +738,37 @@ async def snaptrade_holdings(
             accounts = client.get_accounts()
             logger.info(f"Retrieved {len(accounts)} accounts for {broker}")
             
-            # Fetch order history to get accurate cost basis and order times
-            try:
-                orders_by_symbol = client.get_last_orders_by_symbol(days=365)  # Look back 1 year
-                for symbol, order_data in orders_by_symbol.items():
-                    symbol_upper = symbol.upper()
-                    if symbol_upper not in all_orders_by_symbol:
-                        all_orders_by_symbol[symbol_upper] = order_data
-                    else:
-                        # Keep the most recent order
-                        existing_time = all_orders_by_symbol[symbol_upper].get('time_placed')
-                        new_time = order_data.get('time_placed')
-                        if new_time and (not existing_time or new_time > existing_time):
+            # Only fetch expensive order/activity data if explicitly requested
+            # This significantly speeds up initial page load (from 5+ min to <10 sec)
+            if include_cost_basis:
+                # Fetch order history to get accurate cost basis and order times
+                try:
+                    orders_by_symbol = client.get_last_orders_by_symbol(days=365)  # Look back 1 year
+                    for symbol, order_data in orders_by_symbol.items():
+                        symbol_upper = symbol.upper()
+                        if symbol_upper not in all_orders_by_symbol:
                             all_orders_by_symbol[symbol_upper] = order_data
-                logger.info(f"Fetched order history for {len(orders_by_symbol)} symbols from {broker}")
-            except Exception as order_exc:
-                logger.warning(f"Could not fetch order history from {broker}: {order_exc}")
-            
-            # Also fetch activities to calculate cost basis (fallback method)
-            try:
-                activities = client.get_all_account_activities()
-                cost_basis_from_activities = client.calculate_cost_basis(activities)
-                for symbol, cost in cost_basis_from_activities.items():
-                    symbol_upper = symbol.upper()
-                    if symbol_upper not in all_cost_basis:
-                        all_cost_basis[symbol_upper] = cost
-                logger.info(f"Calculated cost basis from activities for {len(cost_basis_from_activities)} symbols from {broker}")
-            except Exception as activity_exc:
-                logger.warning(f"Could not fetch activities from {broker}: {activity_exc}")
+                        else:
+                            # Keep the most recent order
+                            existing_time = all_orders_by_symbol[symbol_upper].get('time_placed')
+                            new_time = order_data.get('time_placed')
+                            if new_time and (not existing_time or new_time > existing_time):
+                                all_orders_by_symbol[symbol_upper] = order_data
+                    logger.info(f"Fetched order history for {len(orders_by_symbol)} symbols from {broker}")
+                except Exception as order_exc:
+                    logger.warning(f"Could not fetch order history from {broker}: {order_exc}")
+                
+                # Also fetch activities to calculate cost basis (fallback method)
+                try:
+                    activities = client.get_all_account_activities()
+                    cost_basis_from_activities = client.calculate_cost_basis(activities)
+                    for symbol, cost in cost_basis_from_activities.items():
+                        symbol_upper = symbol.upper()
+                        if symbol_upper not in all_cost_basis:
+                            all_cost_basis[symbol_upper] = cost
+                    logger.info(f"Calculated cost basis from activities for {len(cost_basis_from_activities)} symbols from {broker}")
+                except Exception as activity_exc:
+                    logger.warning(f"Could not fetch activities from {broker}: {activity_exc}")
                 
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{broker}: {exc}")
