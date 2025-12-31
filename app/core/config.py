@@ -76,6 +76,11 @@ class Settings(BaseSettings):
         return [str(v)]
     
     # ============================================================================
+    # Encryption Configuration
+    # ============================================================================
+    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")  # 64-char hex for encrypting secrets
+    
+    # ============================================================================
     # Logging Configuration
     # ============================================================================
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
