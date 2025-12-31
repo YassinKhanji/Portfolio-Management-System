@@ -1397,9 +1397,14 @@ async def get_live_portfolio_returns(
             user_query = user_query.filter(func.lower(User.risk_profile) == normalized_risk.lower())
         users = user_query.all()
         
+        # Helper for ISO format before local helpers are defined
+        def _to_iso_early(dt):
+            utc_dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        
         if not users:
             return {
-                "data": [{"timestamp": now.isoformat() + "Z", "return_pct": 0.0}],
+                "data": [{"timestamp": _to_iso_early(now), "return_pct": 0.0}],
                 "current_return": 0.0,
                 "base_value": 1.0,
                 "current_value": 1.0,
@@ -1413,16 +1418,31 @@ async def get_live_portfolio_returns(
                 return dt.replace(tzinfo=timezone.utc)
             return dt
         
+        def _strip_tz(dt):
+            """Strip timezone for SQLite compatibility."""
+            if dt is None:
+                return None
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        
+        def _to_iso(dt):
+            """Convert datetime to proper ISO format with Z suffix."""
+            if dt is None:
+                return None
+            # Ensure UTC and format properly
+            utc_dt = _ensure_tz(dt)
+            # Use strftime to avoid double timezone suffix (+00:00Z)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        
         user_ids = [u.id for u in users]
         created_map = {u.id: _ensure_tz(u.created_at) or now for u in users}
         
         # Get the earliest user creation date as the "session start"
         earliest_created = min(created_map.values())
         
-        # Pull all snapshots from session start
+        # Pull all snapshots from session start (strip tz for SQLite)
         snapshots = db.query(PortfolioSnapshot).filter(
             PortfolioSnapshot.user_id.in_(user_ids),
-            PortfolioSnapshot.recorded_at >= earliest_created
+            PortfolioSnapshot.recorded_at >= _strip_tz(earliest_created)
         ).order_by(PortfolioSnapshot.recorded_at).all()
         
         # Aggregate by timestamp (hourly buckets for granularity)
@@ -1448,7 +1468,7 @@ async def get_live_portfolio_returns(
         
         if not buckets:
             return {
-                "data": [{"timestamp": now.isoformat() + "Z", "return_pct": 0.0}],
+                "data": [{"timestamp": _to_iso(now), "return_pct": 0.0}],
                 "current_return": 0.0,
                 "base_value": 1.0,
                 "current_value": 1.0,
@@ -1465,7 +1485,7 @@ async def get_live_portfolio_returns(
             # Calculate cumulative return percentage
             return_pct = ((value - base_value) / base_value) * 100 if base_value > 0 else 0.0
             data.append({
-                "timestamp": key_dt.isoformat() + "Z",
+                "timestamp": _to_iso(key_dt),
                 "return_pct": round(return_pct, 4),
                 "value": round(value, 2),
             })
@@ -1477,7 +1497,7 @@ async def get_live_portfolio_returns(
         # Add live point if it's different from last historical point
         if last_point and abs(current_return - last_point["return_pct"]) > 0.001:
             data.append({
-                "timestamp": now.isoformat() + "Z",
+                "timestamp": _to_iso(now),
                 "return_pct": round(current_return, 4),
                 "value": round(current_total, 2),
                 "is_live": True,
@@ -1488,7 +1508,7 @@ async def get_live_portfolio_returns(
             "current_return": round(current_return, 4),
             "base_value": round(base_value, 2),
             "current_value": round(current_total, 2),
-            "session_start": earliest_created.isoformat() + "Z",
+            "session_start": _to_iso(earliest_created),
         }
         
     except Exception as e:
@@ -1862,3 +1882,4 @@ async def update_risk_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update risk profile"
         )
+ 
