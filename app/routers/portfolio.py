@@ -879,6 +879,7 @@ async def get_balance_history(
     Get historical balance data for the current user's account.
     
     Returns balance history from account creation to now, suitable for line charts.
+    Includes the current live value as the latest data point.
     
     Args:
         category: Filter by asset category - 'all', 'crypto', 'equity', or 'cash'
@@ -927,6 +928,52 @@ async def get_balance_history(
                 "timestamp": user.created_at.isoformat(),
                 "value": 0.0,
             })
+        
+        # Add current live value as the latest data point
+        # Fetch current positions to get live totals
+        try:
+            positions = db.query(Position).filter(Position.user_id == user.id).all()
+            current_total = 0.0
+            current_crypto = 0.0
+            current_equity = 0.0
+            current_cash = 0.0
+            
+            for pos in positions:
+                val = float(pos.market_value or 0.0)
+                metadata = pos.metadata_json or {}
+                asset_class = metadata.get('asset_class', '').lower()
+                
+                current_total += val
+                if asset_class == 'crypto':
+                    current_crypto += val
+                elif asset_class == 'equity':
+                    current_equity += val
+                elif asset_class == 'cash':
+                    current_cash += val
+            
+            # Select the appropriate current value based on category
+            if category_lower == "all":
+                current_value = current_total
+            elif category_lower == "crypto":
+                current_value = current_crypto
+            elif category_lower == "equity" or category_lower == "equities":
+                current_value = current_equity
+            elif category_lower == "cash":
+                current_value = current_cash
+            else:
+                current_value = current_total
+            
+            # Add current value with current timestamp (only if different from last)
+            now = datetime.now(timezone.utc)
+            if current_value > 0:
+                # Only add if it's meaningfully different from the last point or enough time has passed
+                if not history or (history[-1]["value"] != round(current_value, 2)):
+                    history.append({
+                        "timestamp": now.isoformat(),
+                        "value": round(current_value, 2),
+                    })
+        except Exception as e:
+            logger.warning(f"Failed to add live value to balance history: {e}")
         
         return {
             "category": category_lower,
@@ -1253,6 +1300,24 @@ async def get_portfolio_performance(
             else:
                 key_dt = datetime.combine(snap.recorded_at.date(), datetime.min.time())
             buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
+
+        # Append a live "now" point (aggregated from current Positions) so dashboards can refresh
+        try:
+            current_total = (
+                db.query(func.coalesce(func.sum(Position.market_value), 0.0))
+                .filter(Position.user_id.in_(user_ids))
+                .scalar()
+            )
+            current_total_f = float(current_total or 0.0)
+            if current_total_f > 0:
+                key_dt_now = (
+                    now.replace(minute=0, second=0, microsecond=0)
+                    if use_hourly
+                    else datetime.combine(now.date(), datetime.min.time())
+                )
+                buckets[key_dt_now] = current_total_f
+        except Exception as live_exc:  # noqa: BLE001
+            logger.warning(f"Failed to compute live aggregated performance point: {live_exc}")
 
         if not buckets:
             return {"period": period, "data": [], "total_return": 0, "benchmark_return": None, "benchmark_available": False, "resolution": "hourly" if use_hourly else "daily"}
