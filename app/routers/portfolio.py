@@ -509,7 +509,7 @@ async def get_portfolio_health_metrics(
         # Determine lookback window
         upper = period.upper()
         if upper == "YTD":
-            start_date = datetime(now.year, 1, 1)
+            start_date = datetime(now.year, 1, 1, tzinfo=timezone.utc)
         else:
             days_map = {
                 "7D": 7,
@@ -521,6 +521,14 @@ async def get_portfolio_health_metrics(
             }
             days = days_map.get(upper, 30)
             start_date = now - timedelta(days=days)
+
+        def _ensure_aware(dt):
+            """Ensure datetime is timezone-aware (UTC)."""
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
 
         normalized_risk = _normalize_risk(risk_profile) if risk_profile else None
         user_query = db.query(User)
@@ -537,7 +545,7 @@ async def get_portfolio_health_metrics(
                 "asset_performance": [],
             }
 
-        created_map = {u.id: (u.created_at or now) for u in users}
+        created_map = {u.id: _ensure_aware(u.created_at) or now for u in users}
         user_ids = list(created_map.keys())
 
         snapshots_q = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.user_id.in_(user_ids))
@@ -556,10 +564,11 @@ async def get_portfolio_health_metrics(
         # Aggregate portfolio value per day, respecting user creation dates
         by_day: dict = {}
         for snap in snapshots:
-            created_at = created_map.get(snap.user_id, snap.recorded_at)
-            if snap.recorded_at < created_at:
+            snap_recorded = _ensure_aware(snap.recorded_at)
+            created_at = created_map.get(snap.user_id, snap_recorded)
+            if snap_recorded < created_at:
                 continue
-            day = snap.recorded_at.date()
+            day = snap_recorded.date()
             by_day[day] = by_day.get(day, 0.0) + float(snap.total_value or 0.0)
 
         if not by_day:
