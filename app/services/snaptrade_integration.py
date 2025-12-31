@@ -811,6 +811,92 @@ class SnapTradeClient:
         except Exception as e:
             logger.error(f"Failed to place force order: {e}")
             raise SnapTradeClientError(f"Failed to place order: {e}")
+
+    def _resolve_universal_symbol_id(self, account_id: str, ticker: str) -> str:
+        """Resolve a SnapTrade universal_symbol_id for a ticker via quotes."""
+
+        quotes = self.get_quotes(account_id, ticker)
+        quote = None
+        if isinstance(quotes, list) and quotes:
+            quote = quotes[0]
+        elif isinstance(quotes, dict):
+            quote = quotes
+
+        if not isinstance(quote, dict):
+            raise SnapTradeClientError("Quote not found")
+
+        universal_symbol_id = (
+            quote.get("universal_symbol", {}).get("id")
+            or quote.get("universal_symbol_id")
+            or quote.get("symbol_id")
+        )
+        if not universal_symbol_id:
+            raise SnapTradeClientError("Universal symbol id not resolved")
+        return str(universal_symbol_id)
+
+    def _as_trade_order(self, raw: object, *, symbol: str, side: str, quantity: float, fallback_price: float = 0.0) -> TradeOrder:
+        """Convert a SnapTrade order response into a TradeOrder."""
+
+        payload: Dict = raw if isinstance(raw, dict) else {}
+        order_id = (
+            payload.get("id")
+            or payload.get("order_id")
+            or payload.get("orderId")
+            or uuid.uuid4().hex
+        )
+        status = (
+            payload.get("status")
+            or payload.get("state")
+            or payload.get("order_status")
+            or "SUBMITTED"
+        )
+        price = _to_float(payload.get("price", fallback_price), "order.price")
+        return TradeOrder(
+            order_id=str(order_id),
+            symbol=symbol,
+            quantity=float(quantity),
+            price=float(price),
+            side=side,
+            status=str(status),
+            timestamp=datetime.utcnow(),
+        )
+
+    def buy(self, account_id: str, ticker: str, units: float) -> TradeOrder:
+        """Convenience: place a market BUY using ticker."""
+        universal_symbol_id = self._resolve_universal_symbol_id(account_id, ticker)
+        raw = self.place_force_order(
+            account_id=account_id,
+            action="BUY",
+            order_type="market",
+            price=None,
+            stop=None,
+            time_in_force="DAY",
+            units=units,
+            universal_symbol_id=universal_symbol_id,
+        )
+        return self._as_trade_order(raw, symbol=ticker, side="BUY", quantity=units)
+
+    def sell(self, account_id: str, ticker: str, units: float) -> TradeOrder:
+        """Convenience: place a market SELL using ticker."""
+        universal_symbol_id = self._resolve_universal_symbol_id(account_id, ticker)
+        raw = self.place_force_order(
+            account_id=account_id,
+            action="SELL",
+            order_type="market",
+            price=None,
+            stop=None,
+            time_in_force="DAY",
+            units=units,
+            universal_symbol_id=universal_symbol_id,
+        )
+        return self._as_trade_order(raw, symbol=ticker, side="SELL", quantity=units)
+
+    def cancel_order(self, account_id: str, order_id: str) -> bool:
+        """Cancel an order.
+
+        Not currently implemented in this integration layer (SDK endpoint varies by broker).
+        """
+        raise SnapTradeClientError("Order cancellation is not implemented for this SnapTrade integration")
     
     def get_account_orders(self, account_id: str, days: int = 90) -> List[Dict]:
         """Get all orders for an account.

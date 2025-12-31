@@ -4,9 +4,7 @@ Execute trades via SnapTrade API using per-connection credentials and account ty
 """
 
 import logging
-from typing import Dict, List, Optional
-
-from sqlalchemy.orm import Session
+from typing import Dict, List, Optional, Tuple
 
 from app.models.database import Connection
 from app.services.snaptrade_integration import SnapTradeClient, SnapTradeClientError
@@ -28,15 +26,64 @@ class TradeExecutor:
                 user_secret=conn.snaptrade_user_secret,
             )
 
+    def _normalize_account_key(self, raw: str) -> str:
+        acct_type = str(raw or "").lower()
+        if acct_type in {"crypto", "cryptocurrency"}:
+            return "crypto"
+        if acct_type in {"equities", "equity", "stock", "stocks"}:
+            return "equities"
+        return "equities"
+
+    def _get_connection_client_account_id(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        account_type: Optional[str] = None,
+    ) -> Tuple[Connection, SnapTradeClient, str]:
+        """Resolve a connection + client + account_id for non-trade calls.
+
+        - If account_id is provided, it must match a known connection.
+        - Else if account_type is provided, it routes using the same mapping as trade execution.
+        - Else defaults to equities.
+        """
+
+        conn: Optional[Connection] = None
+        key: Optional[str] = None
+
+        if account_id:
+            for k, candidate in self.connections.items():
+                if candidate.account_id == account_id:
+                    conn = candidate
+                    key = k
+                    break
+            if not conn:
+                raise SnapTradeClientError("Unknown account_id for TradeExecutor")
+        else:
+            key = self._normalize_account_key(account_type or "equities")
+            conn = self.connections.get(key)
+            if not conn:
+                raise SnapTradeClientError(f"No SnapTrade connection configured for account_type='{key}'")
+            account_id = conn.account_id
+
+        if not account_id:
+            raise SnapTradeClientError("SnapTrade connection is missing account_id")
+
+        client = self.clients.get(key or "")
+        if not client:
+            # Defensive: if clients dict got out of sync with connections.
+            client = SnapTradeClient(
+                user_id=conn.snaptrade_user_id,
+                user_secret=conn.snaptrade_user_secret,
+            )
+            if key:
+                self.clients[key] = client
+
+        return conn, client, account_id
+
     def _pick_connection(self, trade_info: Dict) -> Connection:
         """Select connection based on trade metadata (account_type/asset_class)."""
         acct_type = str(trade_info.get("account_type") or trade_info.get("asset_class") or "").lower()
-        if acct_type in {"crypto", "cryptocurrency"}:
-            key = "crypto"
-        elif acct_type in {"equities", "equity", "stock", "stocks"}:
-            key = "equities"
-        else:
-            key = "equities"  # default route
+        key = self._normalize_account_key(acct_type)
 
         conn = self.connections.get(key)
         if not conn:
@@ -70,7 +117,14 @@ class TradeExecutor:
             for symbol, trade_info in trades.items():
                 try:
                     conn = self._pick_connection(trade_info)
-                    client = self.clients[conn.account_type.lower()]
+                    key = conn.account_type.lower()
+                    client = self.clients.get(key)
+                    if not client:
+                        client = SnapTradeClient(
+                            user_id=conn.snaptrade_user_id,
+                            user_secret=conn.snaptrade_user_secret,
+                        )
+                        self.clients[key] = client
                     account_id = conn.account_id
 
                     action = trade_info['action']
@@ -113,7 +167,8 @@ class TradeExecutor:
     def get_current_holdings(self, account_id: str = None) -> Dict:
         """Get current portfolio holdings"""
         try:
-            holdings = self.client.get_holdings(account_id)
+            _, client, resolved_account_id = self._get_connection_client_account_id(account_id=account_id)
+            holdings = client.get_holdings(resolved_account_id)
             
             return {
                 h.symbol: {
@@ -134,7 +189,8 @@ class TradeExecutor:
             if is_emergency_stop_active():
                 logger.error("Emergency stop active; cancel order skipped")
                 raise RuntimeError("Trading halted: emergency_stop is active")
-            return self.client.cancel_order(account_id, order_id)
+            _, client, resolved_account_id = self._get_connection_client_account_id(account_id=account_id)
+            return client.cancel_order(resolved_account_id, order_id)
         except SnapTradeClientError as e:
             logger.error("Failed to cancel order", exc_info=True)
             raise
