@@ -91,8 +91,8 @@ def test_symbol_lookup_returns_universal_id(monkeypatch, test_app):
     conn = Connection(
         id=str(uuid.uuid4()),
         user_id=user.id,
-        snaptrade_user_id="user-id",
-        snaptrade_user_secret="secret",
+        snaptrade_user_id="test-user-id",
+        snaptrade_user_secret="test-fake-secret-for-unit-tests",  # nosec - test fixture only
         account_type="equities",
         broker="wealthsimple",
         is_connected=True,
@@ -125,8 +125,8 @@ def test_order_endpoint_fallbacks_to_ioc(monkeypatch, test_app):
     conn = Connection(
         id=str(uuid.uuid4()),
         user_id=user.id,
-        snaptrade_user_id="user-id",
-        snaptrade_user_secret="secret",
+        snaptrade_user_id="test-user-id",
+        snaptrade_user_secret="test-fake-secret-for-unit-tests",  # nosec - test fixture only
         account_type="equities",
         broker="wealthsimple",
         is_connected=True,

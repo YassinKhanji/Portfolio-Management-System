@@ -79,8 +79,8 @@ def test_app():
         Connection(
             id=str(uuid.uuid4()),
             user_id=user_id,
-            snaptrade_user_id="snap-user",
-            snaptrade_user_secret="secret",
+            snaptrade_user_id="test-snap-user",
+            snaptrade_user_secret="test-fake-secret-for-unit-tests",  # nosec - test fixture only
             account_type="crypto",
             broker="kraken",
             is_connected=True,
