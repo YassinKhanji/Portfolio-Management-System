@@ -824,32 +824,23 @@ async def snaptrade_holdings(
                 else:
                     asset_class = "equity"
                 
-                # Get the reported currency from holding
-                original_currency = h.currency or "CAD"
+                # Get the reported currency from holding - SnapTrade reports in USD typically
+                original_currency = h.currency or "USD"
                 
                 # Log raw values from SnapTrade for debugging
                 logger.info(f"RAW from SnapTrade - {symbol_val}: price={h.price}, avg_price={h.average_purchase_price}, currency={original_currency}, broker={broker}")
                 
-                # For Kraken: SnapTrade may incorrectly report USD but the values are actually in CAD
-                # (as shown in the Kraken app which displays CAD prices)
-                # Check if this is a Kraken account that should be CAD
-                effective_currency = original_currency
-                if broker == "kraken":
-                    # Kraken Canada accounts use CAD - check if the currency seems wrong
-                    # If reported as USD but values look like CAD, trust Kraken's CAD display
-                    effective_currency = "CAD"  # Force CAD for Kraken since Kraken Canada uses CAD
-                    logger.info(f"Kraken broker detected - using CAD as effective currency (was reported as {original_currency})")
+                # Convert price and market_value to CAD 
+                price_cad = convert_to_cad(h.price, original_currency)
+                market_value_cad = convert_to_cad(h.market_value, original_currency)
                 
-                # Convert price and market_value to CAD if in different currency
-                price_cad = convert_to_cad(h.price, effective_currency)
-                market_value_cad = convert_to_cad(h.market_value, effective_currency)
-                
-                # Get average purchase price (cost basis) from holding
+                # Get average purchase price (cost basis) from holding and convert to CAD
                 avg_purchase_price = getattr(h, 'average_purchase_price', 0) or 0
-                if avg_purchase_price and effective_currency.upper() != "CAD":
-                    avg_purchase_price = convert_to_cad(avg_purchase_price, effective_currency)
+                if avg_purchase_price and avg_purchase_price > 0:
+                    avg_purchase_price = convert_to_cad(avg_purchase_price, original_currency)
+                    logger.info(f"Converted avg_purchase_price to CAD: {h.average_purchase_price} {original_currency} -> {avg_purchase_price} CAD")
                 
-                logger.info(f"PROCESSED - {symbol_val}: price_cad={price_cad}, avg_price={avg_purchase_price}, effective_currency={effective_currency}")
+                logger.info(f"PROCESSED - {symbol_val}: price_cad={price_cad}, avg_price_cad={avg_purchase_price}, original_currency={original_currency}")
                 
                 positions_out.append(
                     {
@@ -862,14 +853,14 @@ async def snaptrade_holdings(
                         "price": price_cad,
                         "market_value": market_value_cad,
                         "currency": "CAD",  # All values now in CAD
-                        "original_currency": effective_currency,  # Keep effective currency
+                        "original_currency": original_currency,  # Keep original for reference
                         "asset_class": asset_class,
-                        "average_purchase_price": avg_purchase_price,  # Cost basis from SnapTrade
+                        "average_purchase_price": avg_purchase_price,  # Cost basis in CAD
                     }
                 )
             # Sum holdings value in CAD
             holdings_value = sum(
-                convert_to_cad(h.market_value, h.currency or "CAD") 
+                convert_to_cad(h.market_value, h.currency or "USD") 
                 for h in holdings if h.market_value
             )
             logger.info(f"Total holdings value for {acct.id} (in CAD): {holdings_value}")
@@ -944,29 +935,27 @@ async def snaptrade_holdings(
             # Priority 1: Average purchase price from holdings API (most reliable - directly from broker)
             if pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
                 cost_basis = pos["average_purchase_price"]
-                logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API)")
+                logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API, already in CAD)")
             
             # Priority 2: Weighted average buy price from order history
             if not cost_basis:
                 avg_buy_price = order_data.get('avg_buy_price', 0)
                 if avg_buy_price and avg_buy_price > 0:
-                    # Convert to CAD if needed
-                    original_currency = pos.get("original_currency", "CAD")
-                    if original_currency.upper() != "CAD":
-                        avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
+                    # Order history prices from SnapTrade are in USD - convert to CAD
+                    original_currency = pos.get("original_currency", "USD")
+                    avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
                     cost_basis = avg_buy_price
-                    logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history)")
+                    logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history, converted from {original_currency})")
             
             # Priority 3: Cost basis from activities
             if not cost_basis:
                 activity_cost = all_cost_basis.get(symbol_upper, 0)
                 if activity_cost and activity_cost > 0:
-                    # Convert to CAD if needed
-                    original_currency = pos.get("original_currency", "CAD")
-                    if original_currency.upper() != "CAD":
-                        activity_cost = convert_to_cad(activity_cost, original_currency)
+                    # Activities prices from SnapTrade are in USD - convert to CAD
+                    original_currency = pos.get("original_currency", "USD")
+                    activity_cost = convert_to_cad(activity_cost, original_currency)
                     cost_basis = activity_cost
-                    logger.info(f"Using activity-based cost_basis {cost_basis} CAD for {symbol}")
+                    logger.info(f"Using activity-based cost_basis {cost_basis} CAD for {symbol} (converted from {original_currency})")
             
             # Priority 4: Existing database value
             if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
