@@ -28,6 +28,8 @@ from ..services.snaptrade_integration import (
     SnapTradeClient,
 )
 from ..services.email_service import get_email_service
+from ..core.security import limiter, RATE_LIMITS
+from ..core.audit import audit_login, audit_trade, audit_data_access, AuditAction
 import os
 import httpx
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
@@ -409,14 +411,19 @@ async def snaptrade_callback(
             )
 
     # 2. Fall back to SnapTrade credentials (userId + userSecret)
+    # Note: snaptrade_user_secret is now encrypted, so we find by userId first
+    # then verify the decrypted secret matches
     if not connection and userId and userSecret:
         query = db.query(Connection).filter(
             Connection.snaptrade_user_id == userId,
-            Connection.snaptrade_user_secret == userSecret,
         )
         if broker:
             query = query.filter(Connection.broker == broker)
-        connection = query.first()
+        # Find all matching connections and verify secret
+        for conn in query.all():
+            if conn.snaptrade_user_secret == userSecret:
+                connection = conn
+                break
         if connection:
             if not broker:
                 broker = connection.broker
@@ -611,6 +618,40 @@ async def snaptrade_status(
         "snaptrade_linked": bool(current_user.snaptrade_linked),
         "brokers": items,
     }
+
+
+@router.post("/auth/snaptrade/sync")
+async def snaptrade_sync_user_holdings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Sync the current user's holdings from SnapTrade.
+    Updates positions, calculates cost basis from order history, and refreshes return percentages.
+    Called automatically on login and can be triggered manually.
+    """
+    from app.jobs.holdings_sync import sync_user_holdings_sync
+    
+    if not current_user.snaptrade_linked:
+        return {
+            "message": "No SnapTrade connection",
+            "positions_synced": 0,
+            "total_value": 0,
+        }
+    
+    try:
+        result = sync_user_holdings_sync(current_user.id, db)
+        return {
+            "message": "Holdings synced successfully",
+            "positions_synced": result.get("positions_synced", 0),
+            "total_value": round(result.get("total_value", 0), 2),
+        }
+    except Exception as e:
+        logger.error(f"Holdings sync failed for user {current_user.id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Holdings sync failed: {str(e)}"
+        )
 
 
 @router.get("/auth/snaptrade/holdings")
@@ -916,6 +957,7 @@ def _extract_price(quote: dict) -> float:
 
 @router.post("/auth/snaptrade/orders")
 async def snaptrade_place_order(
+    request: Request,
     order: OrderRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1000,11 +1042,64 @@ async def snaptrade_place_order(
                     limit_price=order.limit_price,
                 )
             except SnapTradeClientError as exc:  # noqa: PERF203
+                # Audit failed trade
+                audit_trade(
+                    action=AuditAction.TRADE_FAILED,
+                    user_id=current_user.id,
+                    user_email=current_user.email,
+                    request=request,
+                    symbol=order.ticker,
+                    side=order.side,
+                    quantity=units,
+                    success=False,
+                    error=str(exc),
+                    db_session=db,
+                )
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         else:
+            # Audit failed trade
+            audit_trade(
+                action=AuditAction.TRADE_FAILED,
+                user_id=current_user.id,
+                user_email=current_user.email,
+                request=request,
+                symbol=order.ticker,
+                side=order.side,
+                quantity=units,
+                success=False,
+                error=str(exc),
+                db_session=db,
+            )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
+        # Audit failed trade
+        audit_trade(
+            action=AuditAction.TRADE_FAILED,
+            user_id=current_user.id,
+            user_email=current_user.email,
+            request=request,
+            symbol=order.ticker,
+            side=order.side,
+            quantity=units,
+            success=False,
+            error=str(exc),
+            db_session=db,
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    # Audit successful trade
+    audit_trade(
+        action=AuditAction.ORDER_PLACED,
+        user_id=current_user.id,
+        user_email=current_user.email,
+        request=request,
+        symbol=order.ticker,
+        side=order.side,
+        quantity=units,
+        order_id=placed.get("brokerage_order_id") or placed.get("order_id"),
+        success=True,
+        db_session=db,
+    )
 
     return {
         "order": placed,
@@ -1073,9 +1168,12 @@ def ensure_snaptrade_identity(user: User, db: Session) -> User:
 
 
 @router.post("/auth/register", response_model=Token)
-async def register(user_data: UserRegister, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMITS["register"])
+async def register(request: Request, user_data: UserRegister, db: Session = Depends(get_db)):
     """
     Register a new user
+    
+    Rate limited: 3 requests per minute per IP
     
     Args:
         user_data: User registration data (email, password, full_name)
@@ -1144,9 +1242,12 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/login", response_model=Token)
-async def login(login_data: UserLogin, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMITS["login"])
+async def login(request: Request, login_data: UserLogin, db: Session = Depends(get_db)):
     """
     Login with email and password
+    
+    Rate limited: 5 requests per minute per IP (prevents brute force)
     
     Args:
         login_data: User login data (email and password)
@@ -1160,10 +1261,33 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
         # Authenticate user
         user = authenticate_user(db, login_data.email, login_data.password)
         if not user:
+            # Audit failed login
+            audit_login(
+                email=login_data.email,
+                success=False,
+                request=request,
+                failure_reason="Invalid credentials",
+                db_session=db,
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Block suspended users
+        if user.active is False:
+            audit_login(
+                email=login_data.email,
+                success=False,
+                request=request,
+                user_id=user.id,
+                failure_reason="Account suspended",
+                db_session=db,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is suspended"
             )
 
         # First-login registering for per-broker SnapTrade identifiers
@@ -1173,13 +1297,6 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
         now = datetime.now(timezone.utc)
         metadata = user.metadata_json or {}
         welcome_already_sent = bool(metadata.get("welcome_email_sent"))
-
-        # Block suspended users
-        if user.active is False:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account is suspended"
-            )
 
         # Set first-login timestamp and update last login
         if not user.first_login_at:
@@ -1209,6 +1326,15 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
         )
         
         logger.info(f"User logged in successfully: {user.email}")
+        
+        # Audit successful login
+        audit_login(
+            email=user.email,
+            success=True,
+            request=request,
+            user_id=user.id,
+            db_session=db,
+        )
         
         return {
             "access_token": access_token,

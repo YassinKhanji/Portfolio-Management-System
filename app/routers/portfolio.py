@@ -27,10 +27,13 @@ from ..models.database import (
     Alert,
     AlertPreference,
     Log,
+    PerformanceSession,
+    BenchmarkSnapshot,
 )
 from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
 from ..services.snaptrade_integration import get_snaptrade_client
+from ..services.performance_session import PerformanceSessionService
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -221,6 +224,178 @@ def _get_sp500_intraday() -> List[dict]:
             _benchmark_intraday_cache["fetched_at"] = datetime.now(timezone.utc)
             _benchmark_intraday_cache["data"] = data
     return data
+
+
+# ============================================================================
+# PERFORMANCE SESSION MANAGEMENT
+# Performance tracking starts only when a session is opened.
+# ============================================================================
+
+class StartSessionRequest(BaseModel):
+    benchmark_ticker: str = "SPY"
+
+
+@router.post("/performance/session/start")
+async def start_performance_session(
+    request: StartSessionRequest = StartSessionRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Start a new performance tracking session.
+    
+    - Initializes portfolio performance at $1.00 baseline (= 0% on charts)
+    - Pre-populates benchmark data for 30 days prior to today
+    - Returns the active session
+    
+    If a session is already active, returns the existing session.
+    """
+    try:
+        service = PerformanceSessionService(db)
+        session = service.start_session(
+            user_id=current_user.id,
+            benchmark_ticker=request.benchmark_ticker,
+            fetch_benchmark_data=True
+        )
+        
+        return {
+            "status": "success",
+            "message": "Performance session started",
+            "session": {
+                "id": session.id,
+                "user_id": session.user_id,
+                "is_active": session.is_active,
+                "baseline_value": session.baseline_value,
+                "started_at": session.started_at.isoformat(),
+                "benchmark_ticker": session.benchmark_ticker,
+                "benchmark_start_date": session.benchmark_start_date.isoformat() if session.benchmark_start_date else None
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to start performance session: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/performance/session/stop")
+async def stop_performance_session(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Stop the active performance tracking session.
+    
+    - Pauses data recording
+    - Does NOT delete any existing data
+    - Session can be resumed later
+    """
+    try:
+        service = PerformanceSessionService(db)
+        session = service.stop_session(current_user.id)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="No active session found")
+        
+        return {
+            "status": "success",
+            "message": "Performance session stopped",
+            "session": {
+                "id": session.id,
+                "is_active": session.is_active,
+                "stopped_at": session.stopped_at.isoformat() if session.stopped_at else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to stop performance session: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/performance/session/resume")
+async def resume_performance_session(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Resume the most recently stopped performance session.
+    
+    - Reactivates the session
+    - Continues from last stored snapshot (no reset of baseline)
+    - Appends only new data going forward
+    """
+    try:
+        service = PerformanceSessionService(db)
+        session = service.resume_session(current_user.id)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="No stopped session found to resume")
+        
+        return {
+            "status": "success",
+            "message": "Performance session resumed",
+            "session": {
+                "id": session.id,
+                "is_active": session.is_active,
+                "started_at": session.started_at.isoformat(),
+                "last_snapshot_at": session.last_snapshot_at.isoformat() if session.last_snapshot_at else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to resume performance session: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/performance/session")
+async def get_performance_session(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the current performance session status and data.
+    
+    Returns session info and performance data if a session exists.
+    """
+    try:
+        service = PerformanceSessionService(db)
+        session = service.get_active_session(current_user.id)
+        
+        if not session:
+            # Check for any stopped sessions
+            stopped_session = (
+                db.query(PerformanceSession)
+                .filter(
+                    PerformanceSession.user_id == current_user.id,
+                    PerformanceSession.is_active == False
+                )
+                .order_by(PerformanceSession.stopped_at.desc())
+                .first()
+            )
+            
+            return {
+                "status": "no_active_session",
+                "has_stopped_session": stopped_session is not None,
+                "stopped_session_id": stopped_session.id if stopped_session else None
+            }
+        
+        # Get performance data
+        perf_data = service.get_session_performance(session.id)
+        
+        return {
+            "status": "active",
+            "session": {
+                "id": session.id,
+                "is_active": session.is_active,
+                "baseline_value": session.baseline_value,
+                "started_at": session.started_at.isoformat(),
+                "benchmark_ticker": session.benchmark_ticker
+            },
+            "performance": perf_data
+        }
+    except Exception as e:
+        logger.error(f"Failed to get performance session: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/clients")

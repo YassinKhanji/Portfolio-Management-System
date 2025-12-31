@@ -26,9 +26,12 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 import uuid
+import logging
 
 # Load environment variables from .env file
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Database URL (set in environment)
 DATABASE_URL = os.getenv(
@@ -44,6 +47,49 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# ============================================================================
+# Encryption Helpers for Sensitive Data
+# ============================================================================
+
+def encrypt_secret(plaintext: str) -> str:
+    """Encrypt a sensitive value (like snaptrade_user_secret) before storing."""
+    if not plaintext:
+        return plaintext
+    
+    try:
+        from app.core.security import encrypt_value, is_encrypted
+        # Don't double-encrypt
+        if is_encrypted(plaintext):
+            return plaintext
+        return encrypt_value(plaintext)
+    except ImportError:
+        logger.warning("Encryption module not available - storing plaintext")
+        return plaintext
+    except Exception as e:
+        logger.error(f"Encryption failed: {e}")
+        return plaintext
+
+
+def decrypt_secret(encrypted: str) -> str:
+    """Decrypt a sensitive value when reading from database."""
+    if not encrypted:
+        return encrypted
+    
+    try:
+        from app.core.security import decrypt_value, is_encrypted
+        # Only decrypt if it looks encrypted
+        if not is_encrypted(encrypted):
+            return encrypted
+        return decrypt_value(encrypted)
+    except ImportError:
+        logger.warning("Encryption module not available - returning as-is")
+        return encrypted
+    except Exception as e:
+        logger.error(f"Decryption failed: {e}")
+        return encrypted
+
 
 # ============================================================================
 # Models
@@ -93,7 +139,7 @@ class Connection(Base):
     
     # SnapTrade details
     snaptrade_user_id = Column(String, nullable=False)
-    snaptrade_user_secret = Column(String, nullable=False)  # Should be encrypted
+    _snaptrade_user_secret = Column("snaptrade_user_secret", String, nullable=False)  # Encrypted at rest
     
     # Account type and broker
     account_type = Column(String, nullable=False)  # 'crypto' or 'equities'
@@ -112,6 +158,16 @@ class Connection(Base):
     connected_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    @property
+    def snaptrade_user_secret(self) -> str:
+        """Decrypt the secret when reading."""
+        return decrypt_secret(self._snaptrade_user_secret) if self._snaptrade_user_secret else None
+    
+    @snaptrade_user_secret.setter
+    def snaptrade_user_secret(self, value: str):
+        """Encrypt the secret when storing."""
+        self._snaptrade_user_secret = encrypt_secret(value) if value else None
 
 
 class Position(Base):
@@ -357,6 +413,69 @@ class SystemStatus(Base):
     
     # Last update
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class PerformanceSession(Base):
+    """
+    Performance tracking session.
+    Controls when portfolio performance data should be recorded.
+    Performance measurement starts only when a session is active.
+    """
+    __tablename__ = "performance_sessions"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)
+    
+    # Session state
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Performance baseline - starts at $1.00 (corresponds to 0% on charts)
+    baseline_value = Column(Float, default=1.0)  # Base value for return calculations
+    
+    # Session timing
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    stopped_at = Column(DateTime, nullable=True)
+    last_snapshot_at = Column(DateTime, nullable=True)
+    
+    # Benchmark tracking
+    benchmark_start_date = Column(DateTime, nullable=True)  # 30 days before portfolio start
+    benchmark_ticker = Column(String, default="SPY")  # Default benchmark
+    
+    # Session metadata
+    metadata_json = Column(JSON, default={})
+    
+    # Timestamps
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class BenchmarkSnapshot(Base):
+    """
+    Historical benchmark data storage.
+    Benchmark data is stored starting 30 days before portfolio performance start date.
+    """
+    __tablename__ = "benchmark_snapshots"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String, nullable=False, index=True)  # Links to PerformanceSession
+    
+    # Benchmark data
+    ticker = Column(String, nullable=False, default="SPY")  # e.g., SPY, QQQ
+    value = Column(Float, nullable=False)  # Benchmark value/price
+    
+    # For return calculations
+    return_pct = Column(Float, default=0.0)  # Return percentage from session start
+    
+    # Timestamp
+    recorded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    
+    # Data source metadata
+    source = Column(String, default="twelve_data")  # twelve_data, alpha_vantage, etc.
+
+
+# Add indexes for efficient querying
+Index('idx_perf_session_user_active', PerformanceSession.user_id, PerformanceSession.is_active)
+Index('idx_benchmark_session_date', BenchmarkSnapshot.session_id, BenchmarkSnapshot.recorded_at)
 
 
 # ============================================================================

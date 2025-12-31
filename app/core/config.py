@@ -6,10 +6,11 @@ Based on SYSTEM_SPECIFICATIONS.md
 """
 
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 import json
 from functools import lru_cache
 import os
-from typing import List
+from typing import List, Union
 
 
 class Settings(BaseSettings):
@@ -51,19 +52,28 @@ class Settings(BaseSettings):
     # ============================================================================
     # CORS Configuration
     # ============================================================================
-    # Support JSON array or comma-separated string from environment
-    _raw_cors = os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:5173,http://localhost:3000,https://your-vercel-app.vercel.app"
-    )
-    try:
-        CORS_ORIGINS: List[str] = (
-            json.loads(_raw_cors)
-            if _raw_cors.strip().startswith("[")
-            else [o.strip().strip('"').strip("'") for o in _raw_cors.split(",") if o.strip()]
-        )
-    except Exception:
-        CORS_ORIGINS: List[str] = [o.strip().strip('"').strip("'") for o in _raw_cors.split(",") if o.strip()]
+    # Accepts: JSON array '["url1","url2"]', comma-separated 'url1,url2', or single URL
+    CORS_ORIGINS: Union[str, List[str]] = "http://localhost:5173"
+    
+    @field_validator('CORS_ORIGINS', mode='before')
+    @classmethod
+    def parse_cors_origins(cls, v):
+        """Parse CORS_ORIGINS from various formats"""
+        if v is None or v == "":
+            return ["http://localhost:5173"]
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            # Try JSON array first
+            if v.startswith("["):
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    pass
+            # Comma-separated or single URL
+            return [origin.strip().strip('"').strip("'") for origin in v.split(",") if origin.strip()]
+        return [str(v)]
     
     # ============================================================================
     # Logging Configuration

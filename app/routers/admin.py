@@ -4,7 +4,7 @@ Admin Router
 Owner-gated endpoints for managing users and roles.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime, timezone
@@ -15,6 +15,7 @@ from ..models.database import SessionLocal, User, Connection, Position
 from ..routers.auth import get_current_user, get_password_hash
 from ..core.config import get_settings
 from ..core.currency import convert_to_cad
+from ..core.audit import audit_admin_action, AuditAction
 from ..services.snaptrade_integration import get_snaptrade_client, SnapTradeClientError
 import logging
 
@@ -270,7 +271,8 @@ def unsuspend_user(
 @router.delete("/users/{user_id}")
 def delete_user(
     user_id: str,
-    _: User = Depends(require_owner),
+    request: Request,
+    current_user: User = Depends(require_owner),
     db: Session = Depends(get_db)
 ):
     """Delete a user and clean up SnapTrade identities/connections."""
@@ -278,6 +280,17 @@ def delete_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Audit the delete action
+    audit_admin_action(
+        action=AuditAction.ADMIN_DELETE_CLIENT,
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        request=request,
+        target_user_id=user.id,
+        target_user_email=user.email,
+        db_session=db,
+    )
 
     # Collect unique SnapTrade user IDs for this user to delete upstream
     connections = db.query(Connection).filter(Connection.user_id == user.id).all()
@@ -319,7 +332,8 @@ def delete_user(
 
 @router.post("/sync-holdings")
 def sync_all_holdings_now(
-    _: User = Depends(require_owner),
+    request: Request,
+    current_user: User = Depends(require_owner),
     db: Session = Depends(get_db)
 ):
     """
@@ -327,6 +341,15 @@ def sync_all_holdings_now(
     This fetches live holdings from SnapTrade and updates the Position table.
     """
     from app.jobs.holdings_sync import sync_all_holdings_sync
+    
+    # Audit the sync action
+    audit_admin_action(
+        action=AuditAction.ADMIN_SYNC_HOLDINGS,
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        request=request,
+        db_session=db,
+    )
     
     try:
         result = sync_all_holdings_sync()
