@@ -802,19 +802,26 @@ class SnapTradeClient:
     
     def get_last_orders_by_symbol(self, days: int = 90) -> Dict[str, Dict]:
         """
-        Get the most recent order for each symbol across all accounts.
+        Get order data for each symbol across all accounts.
+        
+        Calculates:
+        - Weighted average BUY price (for cost basis calculation)
+        - Most recent order time and action (for display)
         
         Args:
             days: Number of days to look back for orders
         
         Returns:
-            Dict mapping symbol -> {time_placed, action, status}
-            Where action is BUY or SELL and time_placed is a datetime string
+            Dict mapping symbol -> {time_placed, action, status, price, avg_buy_price}
+            Where price is the avg buy price (cost basis) and time_placed is from the last order
         """
         symbol_orders: Dict[str, Dict] = {}
+        # Track all buy orders per symbol to calculate weighted average
+        symbol_buy_orders: Dict[str, list] = {}
         
         try:
             all_orders = self.get_all_account_orders(days=days)
+            logger.info(f"Processing {len(all_orders)} orders for cost basis calculation")
             
             for order in all_orders:
                 try:
@@ -870,37 +877,78 @@ class SnapTradeClient:
                     
                     status = order.get('status', 'UNKNOWN').upper()
                     
-                    # Only track EXECUTED/FILLED orders for display
+                    # Only track EXECUTED/FILLED orders
                     if status not in ('EXECUTED', 'FILLED', 'COMPLETE', 'COMPLETED'):
                         continue
                     
-                    # Get execution price for cost basis calculation
+                    # Get execution price and quantity for cost basis calculation
                     execution_price = _to_float(order.get('execution_price', 0), 'execution_price')
+                    filled_quantity = _to_float(
+                        order.get('filled_quantity') or order.get('total_quantity') or order.get('units') or 0,
+                        'filled_quantity'
+                    )
                     
-                    # Store if this is the most recent order for this symbol
+                    logger.info(f"Order: {symbol} {action} qty={filled_quantity} @ {execution_price} on {time_placed}")
+                    
+                    # Collect BUY orders for weighted average calculation
+                    if action == 'BUY' and execution_price > 0 and filled_quantity > 0:
+                        if symbol not in symbol_buy_orders:
+                            symbol_buy_orders[symbol] = []
+                        symbol_buy_orders[symbol].append({
+                            'price': execution_price,
+                            'quantity': filled_quantity,
+                            'time': time_placed
+                        })
+                    
+                    # Track the most recent order for display (time and action)
                     if symbol not in symbol_orders:
                         symbol_orders[symbol] = {
                             'time_placed': time_placed,
                             'action': action,
                             'status': status,
                             'price': execution_price,
+                            'avg_buy_price': 0.0,  # Will be calculated below
                         }
                     else:
                         # Compare times, keep the most recent
                         existing_time = symbol_orders[symbol].get('time_placed')
                         if time_placed and (not existing_time or time_placed > existing_time):
-                            symbol_orders[symbol] = {
+                            symbol_orders[symbol].update({
                                 'time_placed': time_placed,
                                 'action': action,
                                 'status': status,
-                                'price': execution_price,
-                            }
+                            })
                 
                 except Exception as e:
                     logger.warning(f"Failed to process order for symbol lookup: {e}")
                     continue
             
-            logger.info(f"Found last orders for {len(symbol_orders)} symbols")
+            # Calculate weighted average BUY price for each symbol (this is the cost basis)
+            for symbol, buy_orders in symbol_buy_orders.items():
+                total_cost = sum(o['price'] * o['quantity'] for o in buy_orders)
+                total_qty = sum(o['quantity'] for o in buy_orders)
+                
+                if total_qty > 0:
+                    avg_buy_price = total_cost / total_qty
+                    logger.info(f"Calculated avg buy price for {symbol}: {avg_buy_price:.6f} from {len(buy_orders)} orders (total qty: {total_qty})")
+                    
+                    if symbol in symbol_orders:
+                        symbol_orders[symbol]['avg_buy_price'] = avg_buy_price
+                        # Use avg buy price as the primary price (cost basis)
+                        symbol_orders[symbol]['price'] = avg_buy_price
+                    else:
+                        # Symbol only has buy orders, create entry
+                        # Get earliest buy time for display
+                        earliest_time = min((o['time'] for o in buy_orders if o['time']), default=None)
+                        symbol_orders[symbol] = {
+                            'time_placed': earliest_time,
+                            'action': 'BUY',
+                            'status': 'FILLED',
+                            'price': avg_buy_price,
+                            'avg_buy_price': avg_buy_price,
+                        }
+            
+            logger.info(f"Found orders for {len(symbol_orders)} symbols with cost basis calculated")
             return symbol_orders
             
         except Exception as e:

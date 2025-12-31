@@ -903,19 +903,34 @@ async def snaptrade_holdings(
             symbol_upper = symbol.upper()
             existing = existing_positions.get(symbol)
             
-            # Get cost_basis from multiple sources (priority order):
-            # 1. Existing position in database
-            # 2. Average purchase price from SnapTrade holdings API
-            # 3. Order execution price from SnapTrade orders API
-            cost_basis = None
-            if existing and existing.cost_basis and existing.cost_basis > 0:
-                cost_basis = existing.cost_basis
-            elif pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
-                cost_basis = pos["average_purchase_price"]
-                logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol}")
-            
-            # Get last order data from SnapTrade orders API
+            # Get order data from SnapTrade orders API (includes weighted avg buy price)
             order_data = all_orders_by_symbol.get(symbol_upper, {})
+            
+            # Get cost_basis from multiple sources (priority order):
+            # 1. Weighted average BUY price from order history (most accurate)
+            # 2. Average purchase price from SnapTrade holdings API
+            # 3. Existing position in database (preserved from previous syncs)
+            cost_basis = None
+            
+            # Priority 1: Weighted average buy price from order history
+            avg_buy_price = order_data.get('avg_buy_price', 0)
+            if avg_buy_price and avg_buy_price > 0:
+                # Convert to CAD if needed
+                original_currency = pos.get("original_currency", "CAD")
+                if original_currency.upper() != "CAD":
+                    avg_buy_price = convert_to_cad(avg_buy_price, original_currency)
+                cost_basis = avg_buy_price
+                logger.info(f"Using avg_buy_price {cost_basis} CAD as cost_basis for {symbol} (from order history)")
+            
+            # Priority 2: Average purchase price from holdings API
+            if not cost_basis and pos.get("average_purchase_price") and pos["average_purchase_price"] > 0:
+                cost_basis = pos["average_purchase_price"]
+                logger.info(f"Using average_purchase_price {cost_basis} as cost_basis for {symbol} (from holdings API)")
+            
+            # Priority 3: Existing database value
+            if not cost_basis and existing and existing.cost_basis and existing.cost_basis > 0:
+                cost_basis = existing.cost_basis
+                logger.info(f"Using existing DB cost_basis {cost_basis} for {symbol}")
             
             # Get last_order_time from order data or existing position
             last_order_time = None
@@ -932,21 +947,13 @@ async def snaptrade_holdings(
             # Get last_order_side from order data or existing position
             last_order_side = order_data.get('action') or (existing.last_order_side if existing else None) or "HOLD"
             
-            # If no cost_basis yet, try to use the order execution price
-            if not cost_basis and order_data.get('price') and order_data['price'] > 0:
-                order_price = order_data['price']
-                # Convert order price to CAD if needed
-                original_currency = pos.get("original_currency", "CAD")
-                if original_currency.upper() != "CAD":
-                    order_price = convert_to_cad(order_price, original_currency)
-                cost_basis = order_price
-                logger.info(f"Using order execution price {cost_basis} as cost_basis for {symbol}")
-            
             # Calculate change from cost basis (this is the P&L percentage)
             change_24h = 0.0
             if cost_basis and cost_basis > 0 and pos["price"]:
                 change_24h = ((pos["price"] - cost_basis) / cost_basis) * 100
-                logger.info(f"Calculated return for {symbol}: price={pos['price']}, cost_basis={cost_basis}, change={change_24h:.2f}%")
+                logger.info(f"Calculated return for {symbol}: current_price={pos['price']:.6f}, cost_basis={cost_basis:.6f}, return={change_24h:.2f}%")
+            else:
+                logger.warning(f"Cannot calculate return for {symbol}: cost_basis={cost_basis}, price={pos.get('price')}")
             
             # Add these fields to the position output for the API response
             pos["cost_basis"] = cost_basis
