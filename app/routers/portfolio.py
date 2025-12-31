@@ -1405,8 +1405,16 @@ async def get_live_portfolio_returns(
                 "current_value": 1.0,
             }
         
+        def _ensure_tz(dt):
+            """Ensure datetime is timezone-aware (UTC)."""
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+        
         user_ids = [u.id for u in users]
-        created_map = {u.id: (u.created_at or now) for u in users}
+        created_map = {u.id: _ensure_tz(u.created_at) or now for u in users}
         
         # Get the earliest user creation date as the "session start"
         earliest_created = min(created_map.values())
@@ -1420,11 +1428,12 @@ async def get_live_portfolio_returns(
         # Aggregate by timestamp (hourly buckets for granularity)
         buckets: dict = {}
         for snap in snapshots:
-            created_at = created_map.get(snap.user_id, snap.recorded_at)
-            if snap.recorded_at < created_at:
+            snap_recorded = _ensure_tz(snap.recorded_at)
+            created_at = created_map.get(snap.user_id, snap_recorded)
+            if snap_recorded < created_at:
                 continue
             # Use hourly buckets for finer granularity
-            key_dt = snap.recorded_at.replace(minute=0, second=0, microsecond=0)
+            key_dt = snap_recorded.replace(minute=0, second=0, microsecond=0)
             buckets[key_dt] = buckets.get(key_dt, 0.0) + float(snap.total_value or 0.0)
         
         # Get current live value from Position table
