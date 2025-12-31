@@ -4,11 +4,12 @@ Main FastAPI Application
 Entry point for the Portfolio Management Trading System API.
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
+import asyncio
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -49,16 +50,24 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Scheduler disabled; skipping start")
     
-    # Trigger initial holdings sync on startup
-    try:
-        from app.jobs.holdings_sync import sync_all_holdings_sync
-        logger.info("Running initial holdings sync...")
-        result = sync_all_holdings_sync()
-        logger.info(f"Initial sync complete: {result.get('users_processed', 0)} users, ${result.get('total_aum', 0):,.2f} AUM")
-    except Exception as sync_err:
-        logger.warning(f"Initial holdings sync failed: {sync_err}")
+    # Note: Initial holdings sync moved to background to not block healthcheck
+    # The scheduler will sync holdings on its regular schedule
     
     logger.info("[OK] System initialized and ready")
+    
+    # Schedule initial sync to run in background after a short delay
+    # This ensures the app is fully started and healthcheck passes first
+    async def delayed_initial_sync():
+        await asyncio.sleep(5)  # Wait 5 seconds for app to be fully ready
+        try:
+            from app.jobs.holdings_sync import sync_all_holdings_sync
+            logger.info("Running initial holdings sync (background)...")
+            result = sync_all_holdings_sync()
+            logger.info(f"Initial sync complete: {result.get('users_processed', 0)} users, ${result.get('total_aum', 0):,.2f} AUM")
+        except Exception as sync_err:
+            logger.warning(f"Initial holdings sync failed: {sync_err}")
+    
+    asyncio.create_task(delayed_initial_sync())
     
     yield
     
