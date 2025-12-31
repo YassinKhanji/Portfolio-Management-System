@@ -29,6 +29,7 @@ from ..services.snaptrade_integration import (
     SnapTradeClient,
 )
 from ..services.email_service import get_email_service
+from ..services.market_data import get_live_crypto_prices, get_live_equity_price
 from ..core.security import limiter, RATE_LIMITS
 from ..core.audit import audit_login, audit_trade, audit_data_access, AuditAction
 import os
@@ -763,6 +764,62 @@ async def snaptrade_holdings(
                 # Use the actual cash from balances field, not account.balance (which may include securities)
                 acct_cash = holdings_result.total_cash if holdings_result.total_cash > 0 else fallback_cash
                 logger.info(f"Retrieved {len(holdings)} holdings for account {acct.id}, actual cash from balances: {holdings_result.total_cash}, using: {acct_cash}")
+                
+                # Fetch live crypto prices for Kraken holdings
+                if broker == "kraken" and holdings:
+                    try:
+                        # Get symbols for all non-cash holdings
+                        crypto_symbols = []
+                        for h in holdings:
+                            symbol_val = h.symbol
+                            # Handle nested symbol structure
+                            max_depth = 3
+                            depth = 0
+                            while isinstance(symbol_val, dict) and depth < max_depth:
+                                inner = symbol_val.get("symbol") or symbol_val.get("raw_symbol")
+                                if inner is None:
+                                    symbol_val = str(symbol_val.get("id", symbol_val))
+                                    break
+                                symbol_val = inner
+                                depth += 1
+                            if not isinstance(symbol_val, str):
+                                symbol_val = str(symbol_val) if symbol_val else ""
+                            
+                            # Skip stablecoins and fiat
+                            symbol_upper = symbol_val.upper().replace(".CX", "")
+                            if symbol_upper not in {"USDC", "USDT", "DAI", "USD", "CAD", "EUR"}:
+                                crypto_symbols.append(symbol_val)
+                        
+                        if crypto_symbols:
+                            live_prices_usd = get_live_crypto_prices(crypto_symbols)
+                            logger.info(f"Fetched live prices for {len(live_prices_usd)} crypto assets: {live_prices_usd}")
+                            
+                            # Update holdings with live prices
+                            for h in holdings:
+                                symbol_val = h.symbol
+                                # Handle nested structure again
+                                max_depth = 3
+                                depth = 0
+                                while isinstance(symbol_val, dict) and depth < max_depth:
+                                    inner = symbol_val.get("symbol") or symbol_val.get("raw_symbol")
+                                    if inner is None:
+                                        symbol_val = str(symbol_val.get("id", symbol_val))
+                                        break
+                                    symbol_val = inner
+                                    depth += 1
+                                if not isinstance(symbol_val, str):
+                                    symbol_val = str(symbol_val) if symbol_val else ""
+                                
+                                symbol_upper = symbol_val.upper()
+                                if symbol_upper in live_prices_usd:
+                                    old_price = h.price
+                                    h.price = live_prices_usd[symbol_upper]
+                                    h.market_value = h.quantity * h.price
+                                    logger.info(f"Updated {symbol_upper} price from {old_price} to {h.price} USD (live)")
+                    except Exception as live_price_exc:
+                        logger.warning(f"Failed to fetch live crypto prices: {live_price_exc}")
+                        # Continue with SnapTrade prices as fallback
+                        
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{broker}/{acct.id}: {exc}")
                 logger.error(f"Failed to get holdings for {broker}/{acct.id}: {exc}")

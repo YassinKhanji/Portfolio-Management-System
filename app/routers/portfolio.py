@@ -34,6 +34,8 @@ from ..routers.auth import get_current_user, oauth2_scheme
 from ..core.config import get_settings
 from ..services.snaptrade_integration import get_snaptrade_client
 from ..services.performance_session import PerformanceSessionService
+from ..services.market_data import get_live_crypto_prices, get_live_equity_price
+from ..core.currency import convert_to_cad
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -1028,14 +1030,14 @@ async def get_portfolio_positions(
     db: Session = Depends(get_db)
 ):
     """
-    Get portfolio positions/assets
+    Get portfolio positions/assets with live prices
     
     Args:
         user_id: Optional user ID to filter by
         limit: Maximum number of positions to return
         
     Returns:
-        List of portfolio positions with current values
+        List of portfolio positions with current values and live prices
     """
     try:
         logger.info(f"Fetching positions (user_id={user_id}, risk_profile={risk_profile}, limit={limit})...")
@@ -1053,12 +1055,51 @@ async def get_portfolio_positions(
         
         positions = query.order_by(Position.market_value.desc()).limit(limit).all()
         
+        # Collect crypto symbols for live price fetching
+        crypto_symbols = []
+        for pos in positions:
+            metadata = pos.metadata_json or {}
+            asset_class = metadata.get('asset_class', '').lower()
+            broker = metadata.get('broker', '').lower()
+            
+            # Check if it's a crypto position
+            if asset_class == 'crypto' or broker == 'kraken':
+                # Skip stablecoins and fiat
+                symbol_upper = pos.symbol.upper()
+                if symbol_upper not in {"USDC", "USDT", "DAI", "USD", "CAD", "EUR", "GBP"}:
+                    crypto_symbols.append(pos.symbol)
+        
+        # Fetch live prices for crypto assets
+        live_prices_usd = {}
+        if crypto_symbols:
+            try:
+                live_prices_usd = get_live_crypto_prices(crypto_symbols)
+                logger.info(f"Fetched live prices for {len(live_prices_usd)} crypto assets")
+            except Exception as e:
+                logger.warning(f"Failed to fetch live crypto prices: {e}")
+        
         result = []
         for pos in positions:
-            # Calculate change percentage from cost basis
+            metadata = pos.metadata_json or {}
+            asset_class = metadata.get('asset_class', '').lower()
+            broker = metadata.get('broker', '').lower()
+            
+            # Use live price if available (for crypto)
+            current_price = pos.price
+            market_value = pos.market_value
+            symbol_upper = pos.symbol.upper()
+            
+            if symbol_upper in live_prices_usd:
+                # Live price is in USD - convert to CAD
+                live_price_usd = live_prices_usd[symbol_upper]
+                current_price = convert_to_cad(live_price_usd, "USD")
+                market_value = pos.quantity * current_price
+                logger.info(f"Using live price for {pos.symbol}: ${live_price_usd} USD = ${current_price} CAD")
+            
+            # Calculate change percentage from cost basis using live price
             change_pct = 0.0
-            if pos.cost_basis and pos.cost_basis > 0 and pos.price:
-                change_pct = ((pos.price - pos.cost_basis) / pos.cost_basis) * 100
+            if pos.cost_basis and pos.cost_basis > 0 and current_price:
+                change_pct = ((current_price - pos.cost_basis) / pos.cost_basis) * 100
             
             # Format last order time as ISO string if present
             last_order_time_str = None
@@ -1068,13 +1109,13 @@ async def get_portfolio_positions(
             result.append({
                 "id": pos.id,
                 "symbol": pos.symbol,
-                "name": pos.metadata_json.get('name', pos.symbol) if pos.metadata_json else pos.symbol,
+                "name": metadata.get('name', pos.symbol),
                 "type": "asset",
                 "balance": pos.quantity,
-                "price": pos.price,
-                "value": pos.market_value,
+                "price": current_price,
+                "value": market_value,
                 "cost_basis": pos.cost_basis,
-                "change_24h": change_pct,  # Now represents change from cost basis
+                "change_24h": change_pct,  # Change from cost basis using live price
                 "last_order_time": last_order_time_str,
                 "last_order_side": pos.last_order_side or "HOLD",
                 "allocation_percent": pos.allocation_percentage or 0.0
