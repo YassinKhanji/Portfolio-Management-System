@@ -18,7 +18,7 @@ Tables:
 - SystemStatus (overall system health)
 """
 
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, JSON, Text, Index
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, JSON, Text, Index, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timezone
@@ -48,11 +48,21 @@ engine = create_engine(
     pool_timeout=30,  # Wait max 30 seconds for a connection
     connect_args={
         "connect_timeout": 10,  # Connection timeout 10 seconds
-        "options": "-c statement_timeout=30000"  # Statement timeout 30 seconds
+        # NOTE: statement_timeout removed from connect_args - Neon pooler doesn't support it
+        # Set statement_timeout at session level instead using event listeners below
     }
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# Set statement_timeout after connection is established (Neon pooler doesn't support it in connect_args)
+@event.listens_for(engine, "connect")
+def set_statement_timeout(dbapi_connection, connection_record):
+    """Set statement_timeout after connection is established - required for Neon pooler compatibility."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET statement_timeout = '30s'")
+    cursor.close()
 
 
 # ============================================================================
