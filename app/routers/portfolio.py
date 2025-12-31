@@ -888,7 +888,7 @@ async def get_balance_history(
     """
     try:
         # Get current user from token
-        user = await get_current_user(token, db)
+        user = get_current_user(token, db)
         if not user:
             raise HTTPException(status_code=401, detail="Not authenticated")
         
